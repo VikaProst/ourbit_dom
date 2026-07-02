@@ -7,5 +7,6 @@ __pycache__/
 
 # личные настройки (у каждого свои, не раздаём)
 proxies.json
+license.txt
 
 # НЕ игнорируем manifest.json и update_url.txt — они нужны для авто-обновления

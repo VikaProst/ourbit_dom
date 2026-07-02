@@ -27,6 +27,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
+import urllib.request
 
 try:
     import websockets
@@ -286,6 +287,38 @@ def _async_cancel_plans(sym):
         _OB.cancel_all_plans(sym)
     except Exception:
         pass
+
+
+# ── АКТИВАЦИЯ по ключу (1 ключ = 1 IP): проверка на сервере активации Вики ──
+_ACT = {"ok": False, "ts": 0.0}
+
+def _act_cfg(fname):
+    try:
+        v = open(os.path.join(HERE, fname), encoding="utf-8").read().strip()
+        return v if (v and not v.startswith("#")) else ""
+    except Exception:
+        return ""
+
+def _activation_ok():
+    srv = _act_cfg("license_server.txt").rstrip("/")
+    if not srv:
+        return True, "активация не требуется"     # сервер активации не задан → открыто (у хозяина/в dev)
+    if _ACT["ok"] and time.time() - _ACT["ts"] < 6 * 3600:
+        return True, "ok"                          # успешный кэш 6ч — краткий простой сервера не блокирует
+    key = _act_cfg("license.txt")
+    if not key:
+        return False, "нет ключа активации — впиши его в license.txt (попроси у Вики)"
+    try:
+        body = json.dumps({"key": key}).encode()
+        req = urllib.request.Request(srv + "/activate", data=body,
+                                     headers={"Content-Type": "application/json", "User-Agent": "term"})
+        r = json.loads(urllib.request.urlopen(req, timeout=8).read().decode())
+    except Exception:
+        return (True, "ok") if _ACT["ok"] else (False, "сервер активации недоступен, попробуй позже")
+    if r.get("ok"):
+        _ACT.update({"ok": True, "ts": time.time()})
+        return True, "ok"
+    return False, r.get("reason") or "ключ не принят"
 
 
 def _trade_connect(token: str) -> dict:
@@ -1419,6 +1452,10 @@ class Handler(BaseHTTPRequestHandler):
                 on = bool(b.get("on"))
                 if on and not _TRADE["connected"]:
                     self._json({"ok": False, "error": "сначала подключись токеном"}); return
+                if on:
+                    okA, whyA = _activation_ok()      # АКТИВАЦИЯ по ключу (1 ключ = 1 IP)
+                    if not okA:
+                        self._json({"ok": False, "error": "🔑 АКТИВАЦИЯ: " + whyA}); return
                 _TRADE["armed"] = on                  # торговля при ЛЮБОЙ комиссии (юзер: торгую везде)
                 if on:
                     threading.Thread(target=_OB.warm, daemon=True).start()   # прогреть соединение при включении LIVE — 1-й ордер сразу быстрый
