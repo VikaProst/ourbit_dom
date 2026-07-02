@@ -519,23 +519,26 @@ function renderLadder(){
     // маркеры позиции/ордеров (из trade.js)
     if(typeof T!=="undefined"){
       const _allpos=(T.allpos&&T.allpos.length)?T.allpos:(T.pos?[T.pos]:[]);
-      if(_allpos.length){                                   // ВСЕ позиции (может быть 2 — hedge long+short): зона PnL + прозрачный бейдж слева для КАЖДОЙ
+      const _cur=[], _other=[];
+      for(const P of _allpos){ if(!(P.vol>0)) continue; ((!P.symbol||P.symbol===S.symbol)?_cur:_other).push(P); }
+      if(_cur.length || _other.length){                     // зоны рисуем ТОЛЬКО для текущей монеты; позы др.монет — только счётчик в плашке
         let _tVal=0,_tPnl=0; const _cs=S.contractSize||1;
-        for(const P of _allpos){ if(!(P.avg>0)) continue;
+        for(const P of _cur){ if(!(P.avg>0)) continue;
           const long=P.side===1, avg=P.avg, rtPnl=(mid-avg)*P.vol*_cs*(long?1:-1);
           _tVal+=P.vol*_cs*mid; _tPnl+=rtPnl;
           const ey=Math.round((topS-avg/step+0.5)*rH), cy=Math.round((topS-mid/step+0.5)*rH);
           const zt=Math.max(0,Math.min(ey,cy)), zb=Math.min(H,Math.max(ey,cy));
           if(zb>zt){ g.fillStyle=rtPnl>=0?"rgba(63,224,122,.28)":"rgba(255,95,89,.28)"; g.fillRect(0,zt,LW,zb-zt); }
-          // бейдж размера рисуется СЛЕВА от стакана (на левой панели), см. renderFootprint — тут только зона
         }
-        S._posRT={cnt:_allpos.length, val:_tVal, pnl:_tPnl, entry:_allpos[0].avg, long:_allpos[0].side===1};
+        const _oPnl=_other.reduce((s,p)=>s+(p.pnl||0),0);
+        S._posRT=(_cur.length||_other.length)?{cnt:_cur.length, other:_other.length, val:_tVal, pnl:_tPnl+_oPnl,
+                  entry:(_cur[0]?_cur[0].avg:0), long:(_cur[0]?_cur[0].side===1:true)}:null;
       } else S._posRT=null;
       // нижняя плашка позиции под стаканом: цена входа | объём$ | PnL$ (реальное время)
       const _pb=$("posbar");
       if(_pb){ if(S._posRT){ const q=S._posRT; _pb.style.display="flex";
         const pe=$("pb-entry"), pvv=$("pb-val"), pl=$("pb-pnl");
-        if(pe) pe.textContent=(q.cnt>1?(q.cnt+" поз"):q.entry.toFixed(dec));
+        if(pe) pe.textContent = q.other ? (q.cnt+"+"+q.other+" поз") : (q.cnt>1?(q.cnt+" поз"):(q.entry?q.entry.toFixed(dec):"—"));
         if(pvv) pvv.textContent=Math.round(q.val)+"$";
         if(pl){ pl.textContent=(q.pnl>=0?"+":"")+q.pnl.toFixed(2)+"$"; pl.className="pb-pnl "+(q.pnl>=0?"pos":"neg"); }
       } else _pb.style.display="none"; }
@@ -762,7 +765,7 @@ function renderFootprint(){
   // МАРКЕР ПОЗИЦИИ у правого края левой панели (СЛЕВА от стакана): только число, цвет по стороне, прозрачный фон
   if(typeof T!=="undefined"){
     const _ap=(T.allpos&&T.allpos.length)?T.allpos:(T.pos?[T.pos]:[]);
-    for(const P of _ap){ if(!(P.avg>0)) continue;
+    for(const P of _ap){ if(!(P.avg>0)) continue; if(P.symbol && P.symbol!==S.symbol) continue;   // бейдж только для текущей монеты
       const long=P.side===1, y=Math.round((topS - P.avg/step + 0.5)*rowH);
       if(y<-2||y>h+2) continue;
       const txt=(typeof fmt==="function"&&typeof unitVal==="function")?fmt(unitVal(P.vol,P.avg)):(""+Math.round(P.vol));

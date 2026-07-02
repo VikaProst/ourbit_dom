@@ -122,8 +122,9 @@ class ObClient:
                 return float(a.get("availableBalance") or 0), float(a.get("equity") or 0)
         return 0.0, 0.0
 
-    def positions(self, symbol):
-        _, d = self._get("/private/position/open_positions", {"symbol": symbol})
+    def positions(self, symbol=None):
+        params = {"symbol": symbol} if symbol else {}     # symbol=None → ВСЕ открытые позиции по всем монетам
+        _, d = self._get("/private/position/open_positions", params)
         out = []
         for p in (d.get("data") or []):
             hv = float(p.get("holdVol") or 0)
@@ -131,7 +132,8 @@ class ObClient:
                 out.append({"side": int(p.get("positionType") or 0),  # 1 long, 2 short
                             "vol": hv, "avg": float(p.get("openAvgPrice") or p.get("holdAvgPrice") or 0),
                             "pnl": float(p.get("realised") or p.get("unrealised") or 0),
-                            "id": p.get("positionId")})
+                            "id": p.get("positionId"),
+                            "symbol": p.get("symbol") or (symbol or "")})
         return out
 
     def open_orders(self, symbol):

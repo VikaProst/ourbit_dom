@@ -54,13 +54,14 @@ async function setArm(on){
 function snapPx(price){ const t=S.tick||0.01, d=(S.dec!=null?S.dec:8); return price?+(Math.round(price/t)*t).toFixed(d):0; }
 function showPing(ms, ok){ const el=$$("pinglog"); if(!el) return; el.textContent=(ok?"":"✗ ")+ms+"мс";
   el.style.color = !ok?"#ef938f": ms<250?"#6fcf91": ms<700?"#e6a943":"#ef938f"; }
-async function sendOrder(side, otype, price, label, volOverride, positionId){
+async function sendOrder(side, otype, price, label, volOverride, positionId, symOverride){
+  const sym=symOverride||S.symbol;
   const px=snapPx(price);                                    // СНАП цены к тику (убрать float-мусор → биржа не отвергнет по точности)
   const vol=(volOverride!=null && volOverride>0) ? Math.round(volOverride) : volContracts(px||S.bestAsk||1);
   if(!T.armed){ log(`✋ ${label}: LIVE off (vol≈${vol}) — не отправлено`); return; }
   log(`${label}: отправка vol=${vol}…`);
   const t0=(window.performance?performance.now():Date.now());
-  const r=await postJSON("/api/order",{symbol:S.symbol,side,otype,vol,price:px,leverage:S.lev,
+  const r=await postJSON("/api/order",{symbol:sym,side,otype,vol,price:px,leverage:S.lev,
                                        sl:S.slPct||0,tp:S.tpPct||0,
                                        positionId:(positionId!=null?positionId:0)});   // ЗАКРЫТИЕ передаёт positionId — иначе Ourbit откроет новую позу
   const ms=Math.round((window.performance?performance.now():Date.now())-t0);
@@ -87,9 +88,10 @@ const limitSell=(p)=>sendOrder(SIDE.OPEN_SHORT,OT.LIMIT, p, "лимит SELL @"+
 function closePos(){
   const all=(T.allpos&&T.allpos.length)?T.allpos:(T.pos?[T.pos]:[]);
   if(!all.length){ log("нет позиции"); return; }
-  for(const P of all){                                          // закрываем ВСЕ позиции (в т.ч. хедж long+short) в ноль
+  for(const P of all){                                          // закрываем ВСЕ позиции по ВСЕМ монетам (хедж и «чужие» монеты) в ноль
     const side=P.side===1?SIDE.CLOSE_LONG:SIDE.CLOSE_SHORT;
-    sendOrder(side, OT.MARKET, 0, `CLOSE ${P.side===1?"LONG":"SHORT"}`, P.vol, P.id);
+    const c=(P.symbol||S.symbol).replace("_USDT","");
+    sendOrder(side, OT.MARKET, 0, `CLOSE ${c} ${P.side===1?"LONG":"SHORT"}`, P.vol, P.id, P.symbol||S.symbol);
   }
 }
 // «Заявка на закрытие» (MetaScalp): лимитка на ВЕСЬ объём позиции, СТОРОНА ЗАКРЫВАЮЩАЯ (reduce-only) —
@@ -180,7 +182,7 @@ async function refreshAccount(verbose){
     T.orders=orders;
     if(verbose){ const no=(r.orders||[]).length, p=T.pos;   // ↻ переподключение: показать ВСЁ что реально стоит на бирже
       log(`↻ синхронизация: заявок на бирже ${no}${p?`, позиция ${p.side===1?"LONG":"SHORT"} ${fmt(p.vol)} @ ${p.avg}`:", позиции нет"}`,"ok"); }
-    T.balance=r.balance||0; T.equity=r.equity||0; T.allpos=r.positions||[];
+    T.balance=r.balance||0; T.equity=r.equity||0; T.allpos=r.allpos||r.positions||[];   // ВСЕ позиции (по всем монетам)
     T._lastAcct=Date.now();                                   // отметка свежести данных
     if(hadPos && !T.pos){ postJSON("/api/cancelplans",{symbol:S.symbol}); }   // позиция закрылась → снять оставшиеся биржевые стопы (OCO)
     const pi=$$("posinfo");

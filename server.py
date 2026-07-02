@@ -241,7 +241,7 @@ def _want(sym):
 from ob_client import ObClient, TYPE_MARKET
 _OB = ObClient()
 _TRADE = {"connected": False, "armed": False, "zero_fee": False,
-          "balance": 0.0, "equity": 0.0, "fee": None, "auto_stop": True}
+          "balance": 0.0, "equity": 0.0, "fee": None, "auto_stop": False}   # биржевые SL/TP ВЫКЛ по умолчанию (план-ордера накапливались и переоткрывали позы). Стоп — application-side в терминале
 _MAX_VOL = 500000        # аварийный верхний предел контрактов на 1 ордер (защита от NaN/аномалии)
 
 
@@ -302,7 +302,21 @@ def _act_cfg(fname):
 def _activation_ok():
     srv = _act_cfg("license_server.txt").rstrip("/")
     if not srv:
-        return True, "активация не требуется"     # сервер активации не задан → открыто (у хозяина/в dev)
+        # БАЗОВЫЙ режим (без сервера): проверка ключа по локальному keys.json (без привязки к IP)
+        try:
+            allowed = json.load(open(os.path.join(HERE, "keys.json"), encoding="utf-8")).get("allowed") or []
+        except Exception:
+            allowed = []
+        if not allowed:
+            return True, "активация не требуется"   # список ключей пуст → открыто (у хозяина/в dev)
+        key = _act_cfg("license.txt")
+        if not key:
+            return False, "нет ключа активации — впиши его в license.txt (попроси у Вики)"
+        import hashlib
+        if hashlib.sha256(key.encode()).hexdigest() in allowed:
+            return True, "ok"
+        return False, "ключ недействителен или отозван"
+    # СТРОГИЙ режим (1 ключ = 1 IP) через сервер активации
     if _ACT["ok"] and time.time() - _ACT["ts"] < 6 * 3600:
         return True, "ok"                          # успешный кэш 6ч — краткий простой сервера не блокирует
     key = _act_cfg("license.txt")
@@ -1411,7 +1425,8 @@ class Handler(BaseHTTPRequestHandler):
                 avail, equity = _OB.balance()
                 _TRADE.update({"balance": avail, "equity": equity})
                 self._json({"ok": True, "balance": avail, "equity": equity,
-                            "positions": _OB.positions(sym), "orders": _OB.open_orders(sym)})
+                            "positions": _OB.positions(sym), "orders": _OB.open_orders(sym),
+                            "allpos": _OB.positions(None)})    # ВСЕ позиции по всем монетам (чтобы не терять «чужие» позы)
             elif route == "/api/history":       # история закрытых сделок для Финрез (как MetaScalp «Ваши сделки»)
                 if not _TRADE["connected"]:
                     self._json({"ok": False, "error": "не подключено"}); return

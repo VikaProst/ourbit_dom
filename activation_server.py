@@ -1,53 +1,50 @@
-"""Сервер активации «1 ключ = 1 IP» (запускается на ПРЕМИУМ-сервере Вики, всегда включён).
+"""Сервер активации «1 ключ = 1 IP» (на премиум-сервере Вики, всегда включён).
 
-Логика:
-  - разрешённые ключи берёт как sha256-хеши из keys.json твоего GitHub (сам обновляет раз в 60с);
-  - при активации привязывает хеш ключа к IP того, кто первым им воспользовался;
-  - дальше пускает ТОЛЬКО с того же IP; с чужого IP — отказ.
-Управление ключами — через GitHub (make_key.py → keys.json → Commit/Push). Тут ничего править не надо.
-Сброс привязки (если друг сменил IP) — удалить строку из bindings.json и перезапустить, ИЛИ ключ отозвать в keys.json.
+Ключи хранятся ПРЯМО ЗДЕСЬ (act_keys.json) и добавляются мгновенно через админ-API
+(make_key.py у Вики). Никакого GitHub-кэша. IP-привязка: ключ намертво к первому IP.
 
-Запуск на сервере:  python3 -u activation_server.py
-Порт 8790. Держать через systemd/screen, чтобы был всегда.
+Файлы рядом со скриптом:
+  admin_secret.txt  — секрет для админ-API (задаётся при деплое, НЕ публикуется)
+  act_keys.json     — {"allowed":[sha256...]}  (растёт через админ-API)
+  bindings.json     — {sha256: ip}
+
+Эндпоинты:
+  GET  /health                         → статус
+  POST /activate  {key}                → проверка+привязка к IP (это дёргает терминал друга)
+  POST /admin {secret, action, hash}   → add | del | list  (это дёргает make_key.py у Вики)
+
+Запуск: python3 -u activation_server.py   (порт 8790, держать через systemd)
 """
-import json, os, time, hashlib, threading
+import json, os, hashlib, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.request import urlopen, Request
 
 PORT = 8790
-KEYS_URL = "https://raw.githubusercontent.com/VikaProst/ourbit_dom/main/keys.json"
 HERE = os.path.dirname(os.path.abspath(__file__))
+KEYS_FILE = os.path.join(HERE, "act_keys.json")
 BIND_FILE = os.path.join(HERE, "bindings.json")
-
-_ALLOWED = set()          # sha256-хеши разрешённых ключей (из GitHub)
-_BIND = {}                # hash -> ip
+SECRET_FILE = os.path.join(HERE, "admin_secret.txt")
 _LOCK = threading.Lock()
 
 
-def _load_bindings():
-    global _BIND
+def _load(path, default):
     try:
-        _BIND = json.load(open(BIND_FILE, encoding="utf-8"))
+        return json.load(open(path, encoding="utf-8"))
     except Exception:
-        _BIND = {}
+        return default
 
 
-def _save_bindings():
+def _save(path, obj):
     try:
-        json.dump(_BIND, open(BIND_FILE, "w", encoding="utf-8"), indent=1)
+        json.dump(obj, open(path, "w", encoding="utf-8"), indent=1)
     except Exception:
         pass
 
 
-def _refresh_keys():
-    global _ALLOWED
-    while True:
-        try:
-            raw = urlopen(Request(KEYS_URL, headers={"User-Agent": "act"}), timeout=8).read()
-            _ALLOWED = set(json.loads(raw).get("allowed") or [])
-        except Exception:
-            pass
-        time.sleep(60)
+def _secret():
+    try:
+        return open(SECRET_FILE, encoding="utf-8").read().strip()
+    except Exception:
+        return ""
 
 
 class H(BaseHTTPRequestHandler):
@@ -63,45 +60,77 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _body(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        try:
+            return json.loads(self.rfile.read(n).decode() or "{}")
+        except Exception:
+            return {}
+
     def _ip(self):
-        # реальный IP клиента (учитываем прокси/же CDN, если фронт стоит)
         xff = self.headers.get("X-Forwarded-For")
-        return (xff.split(",")[0].strip() if xff else self.client_address[0])
+        return xff.split(",")[0].strip() if xff else self.client_address[0]
 
     def do_GET(self):
         if self.path.startswith("/health"):
-            self._json({"ok": True, "keys": len(_ALLOWED), "bound": len(_BIND)})
+            allowed = _load(KEYS_FILE, {"allowed": []}).get("allowed") or []
+            self._json({"ok": True, "keys": len(allowed), "bound": len(_load(BIND_FILE, {}))})
         else:
             self._json({"ok": False}, 404)
 
     def do_POST(self):
-        if not self.path.startswith("/activate"):
-            self._json({"ok": False}, 404); return
-        n = int(self.headers.get("Content-Length") or 0)
-        try:
-            body = json.loads(self.rfile.read(n).decode() or "{}")
-        except Exception:
-            body = {}
-        key = (body.get("key") or "").strip()
+        if self.path.startswith("/activate"):
+            self._activate()
+        elif self.path.startswith("/admin"):
+            self._admin()
+        else:
+            self._json({"ok": False}, 404)
+
+    def _activate(self):
+        key = (self._body().get("key") or "").strip()
         if not key:
             self._json({"ok": False, "reason": "нет ключа"}); return
         h = hashlib.sha256(key.encode()).hexdigest()
-        if h not in _ALLOWED:
-            self._json({"ok": False, "reason": "ключ недействителен или отозван"}); return
-        ip = self._ip()
         with _LOCK:
-            bound = _BIND.get(h)
-            if bound is None:
-                _BIND[h] = ip; _save_bindings()
+            allowed = set(_load(KEYS_FILE, {"allowed": []}).get("allowed") or [])
+            if h not in allowed:
+                self._json({"ok": False, "reason": "ключ недействителен или отозван"}); return
+            binds = _load(BIND_FILE, {})
+            ip = self._ip()
+            cur = binds.get(h)
+            if cur is None:
+                binds[h] = ip; _save(BIND_FILE, binds)
                 self._json({"ok": True, "ip": ip, "bound": "new"})
-            elif bound == ip:
+            elif cur == ip:
                 self._json({"ok": True, "ip": ip, "bound": "same"})
             else:
-                self._json({"ok": False, "reason": "ключ уже привязан к другому IP (" + bound + ")"})
+                self._json({"ok": False, "reason": "ключ уже привязан к другому IP (" + cur + ")"})
+
+    def _admin(self):
+        b = self._body()
+        if not _secret() or b.get("secret") != _secret():
+            self._json({"ok": False, "reason": "неверный админ-секрет"}, 403); return
+        act = b.get("action")
+        with _LOCK:
+            data = _load(KEYS_FILE, {"allowed": []})
+            allowed = data.get("allowed") or []
+            if act == "list":
+                self._json({"ok": True, "allowed": allowed, "bound": _load(BIND_FILE, {})}); return
+            h = (b.get("hash") or "").strip()
+            if not h:
+                self._json({"ok": False, "reason": "нет hash"}); return
+            if act == "add":
+                if h not in allowed: allowed.append(h)
+                data["allowed"] = allowed; _save(KEYS_FILE, data)
+                self._json({"ok": True, "count": len(allowed)})
+            elif act == "del":
+                allowed = [x for x in allowed if x != h]; data["allowed"] = allowed; _save(KEYS_FILE, data)
+                binds = _load(BIND_FILE, {}); binds.pop(h, None); _save(BIND_FILE, binds)   # снять и IP-привязку
+                self._json({"ok": True, "count": len(allowed)})
+            else:
+                self._json({"ok": False, "reason": "action: add|del|list"})
 
 
 if __name__ == "__main__":
-    _load_bindings()
-    threading.Thread(target=_refresh_keys, daemon=True).start()
-    print(f"Activation server на :{PORT} — keys из {KEYS_URL}")
+    print(f"Activation server :{PORT} — ключи в act_keys.json, админ через /admin")
     ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()
