@@ -85,14 +85,16 @@ const marketBuy =()=>sendOrder(SIDE.OPEN_LONG, OT.MARKET, 0, "BUY рынок");
 const marketSell=()=>sendOrder(SIDE.OPEN_SHORT,OT.MARKET, 0, "SELL рынок");
 const limitBuy =(p)=>sendOrder(SIDE.OPEN_LONG, OT.LIMIT, p, "лимит BUY @"+snapPx(p));
 const limitSell=(p)=>sendOrder(SIDE.OPEN_SHORT,OT.LIMIT, p, "лимит SELL @"+snapPx(p));
-function closePos(){
-  const all=(T.allpos&&T.allpos.length)?T.allpos:(T.pos?[T.pos]:[]);
-  if(!all.length){ log("нет позиции"); return; }
-  for(const P of all){                                          // закрываем ВСЕ позиции по ВСЕМ монетам (хедж и «чужие» монеты) в ноль
-    const side=P.side===1?SIDE.CLOSE_LONG:SIDE.CLOSE_SHORT;
-    const c=(P.symbol||S.symbol).replace("_USDT","");
-    sendOrder(side, OT.MARKET, 0, `CLOSE ${c} ${P.side===1?"LONG":"SHORT"}`, P.vol, P.id, P.symbol||S.symbol);
-  }
+async function closePos(){                                     // D / Alt+клик: закрытие ЧЕРЕЗ СЕРВЕР — он сам берёт ВСЕ позиции с биржи и закрывает (надёжно, не зависит от клиентского T.allpos)
+  if(!T.armed){ log("✋ LIVE off"); return; }
+  const t0=(window.performance?performance.now():Date.now());
+  const r=await postJSON("/api/closeall",{leverage:S.lev});
+  const ms=Math.round((window.performance?performance.now():Date.now())-t0); showPing(ms, !!(r&&r.ok));
+  if(r&&r.ok){
+    log(`закрыто позиций: ${r.closed}/${r.found}`+(r.errors&&r.errors.length?" ⚠ "+r.errors.join("; "):""), (r.errors&&r.errors.length)?"err":"ok");
+    T.pos=null; T.allpos=[]; S._render=true;                   // оптимистично убрать
+  } else log("ошибка закрытия: "+((r&&r.error)||"—"),"err");
+  refreshAccount();
 }
 // «Заявка на закрытие» (MetaScalp): лимитка на ВЕСЬ объём позиции, СТОРОНА ЗАКРЫВАЮЩАЯ (reduce-only) —
 // НЕ откроет новую позицию. Для лонга = продать (CLOSE_LONG), для шорта = купить (CLOSE_SHORT).

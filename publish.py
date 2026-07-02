@@ -12,7 +12,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 INCLUDE = [
     "app.js", "trade.js", "chart.js", "screener.js", "tape.js", "watchlist.js", "finrez.js",
     "notifications.js", "theme.js", "tile.js", "dock.js", "index.html", "style.css",
-    "server.py", "ob_client.py", "proxy.py", "updater.py", "start.bat", "license_server.txt", "keys.json",
+    "server.py", "ob_client.py", "proxy.py", "updater.py", "license_server.txt", "keys.json",
     "chrome-extension/manifest.json", "chrome-extension/popup.html", "chrome-extension/popup.js",
 ]
 

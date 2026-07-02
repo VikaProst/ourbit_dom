@@ -1427,6 +1427,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "balance": avail, "equity": equity,
                             "positions": _OB.positions(sym), "orders": _OB.open_orders(sym),
                             "allpos": _OB.positions(None)})    # ВСЕ позиции по всем монетам (чтобы не терять «чужие» позы)
+            elif route == "/api/plandiag":       # ДИАГНОСТИКА план-ордеров (найти верное поле id для отмены)
+                if not _TRADE["connected"]:
+                    self._json({"ok": False, "error": "не подключено"}); return
+                symq = (qs.get("symbol") or ["XAUT_USDT"])[0]
+                self._json({"ok": True, "diag": _OB.plan_diag(symq)})
             elif route == "/api/history":       # история закрытых сделок для Финрез (как MetaScalp «Ваши сделки»)
                 if not _TRADE["connected"]:
                     self._json({"ok": False, "error": "не подключено"}); return
@@ -1475,6 +1480,24 @@ class Handler(BaseHTTPRequestHandler):
                 if on:
                     threading.Thread(target=_OB.warm, daemon=True).start()   # прогреть соединение при включении LIVE — 1-й ордер сразу быстрый
                 self._json({"ok": True, "state": _trade_state()})
+            elif route == "/api/closeall":       # НАДЁЖНОЕ закрытие: сервер сам берёт ВСЕ позиции с биржи и закрывает (не зависит от клиента)
+                if not _TRADE["armed"]:
+                    self._json({"ok": False, "error": "LIVE не включён"}); return
+                try:
+                    poslist = _OB.positions(None)     # все позиции по всем монетам
+                except Exception as exc:
+                    self._json({"ok": False, "error": "не смог прочитать позиции: " + str(exc)}); return
+                closed, errs = 0, []
+                for p in poslist:
+                    cside = 4 if p.get("side") == 1 else 2   # 4=close long / 2=close short
+                    try:
+                        sc, resp = _OB.create(p.get("symbol"), cside, 5, int(p.get("vol") or 0), 0,
+                                              int(b.get("leverage", 50)), position_id=p.get("id"))
+                        if resp.get("success"): closed += 1
+                        else: errs.append(f"{p.get('symbol')}: {resp.get('message') or resp.get('code')}")
+                    except Exception as exc:
+                        errs.append(f"{p.get('symbol')}: {exc}")
+                self._json({"ok": True, "closed": closed, "found": len(poslist), "errors": errs})
             elif route == "/api/order":
                 if not _TRADE["armed"]:
                     self._json({"ok": False, "error": "LIVE не включён"}); return

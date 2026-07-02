@@ -14,6 +14,7 @@ SKIP_FILES = {
     "admin_secret.txt", "keys_log.txt", "act_keys.json", "bindings.json", "proxies.json",
     "make_key.py", "publish.py", "activation_server.py", "make_friend_package.py",
     "КАК-ВЫДАВАТЬ-КЛЮЧИ.md", "КАК-ПОДЕЛИТЬСЯ-И-ОБНОВЛЯТЬ.md",
+    "ВЫДАТЬ-КЛЮЧ.bat", "СОБРАТЬ-ПАКЕТ-ДРУГУ.bat", "ВЫКАТИТЬ-ОБНОВЛЕНИЕ.bat", "deploy_activation.py",
 }
 SKIP_EXT = {".log", ".bak", ".pyc"}
 SKIP_DIRS = {".git", "__pycache__"}

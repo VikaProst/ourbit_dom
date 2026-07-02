@@ -8,7 +8,8 @@ import os, json, hashlib, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # файлы, которые НЕ трогаем при обновлении (личные настройки/данные друга)
-SKIP = {"update_url.txt", "proxies.json", "manifest.json", "srv.out.log", "srv.err.log"}
+SKIP = {"update_url.txt", "proxies.json", "manifest.json", "srv.out.log", "srv.err.log",
+        "start.bat", "license.txt"}   # start.bat НЕ трогаем (запускается сам себя — перезапись рвёт кодировку); license.txt личный
 
 
 def _url():
