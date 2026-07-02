@@ -531,8 +531,9 @@ function renderLadder(){
           if(zb>zt){ g.fillStyle=rtPnl>=0?"rgba(63,224,122,.28)":"rgba(255,95,89,.28)"; g.fillRect(0,zt,LW,zb-zt); }
         }
         const _oPnl=_other.reduce((s,p)=>s+(p.pnl||0),0);
+        const _pts=_cur[0]?((mid-_cur[0].avg)/(S.tick||0.01))*(_cur[0].side===1?1:-1):0;   // PnL в тиках
         S._posRT=(_cur.length||_other.length)?{cnt:_cur.length, other:_other.length, val:_tVal, pnl:_tPnl+_oPnl,
-                  entry:(_cur[0]?_cur[0].avg:0), long:(_cur[0]?_cur[0].side===1:true)}:null;
+                  pts:_pts, pct:(_tVal?_tPnl/_tVal*100:0), entry:(_cur[0]?_cur[0].avg:0), long:(_cur[0]?_cur[0].side===1:true)}:null;
       } else S._posRT=null;
       // нижняя плашка позиции под стаканом: цена входа | объём$ | PnL$ (реальное время)
       const _pb=$("posbar");
@@ -540,7 +541,11 @@ function renderLadder(){
         const pe=$("pb-entry"), pvv=$("pb-val"), pl=$("pb-pnl");
         if(pe) pe.textContent = q.other ? (q.cnt+"+"+q.other+" поз") : (q.cnt>1?(q.cnt+" поз"):(q.entry?q.entry.toFixed(dec):"—"));
         if(pvv) pvv.textContent=Math.round(q.val)+"$";
-        if(pl){ pl.textContent=(q.pnl>=0?"+":"")+q.pnl.toFixed(2)+"$"; pl.className="pb-pnl "+(q.pnl>=0?"pos":"neg"); }
+        if(pl){ const fmt=S.pnlFmt||"usd";
+          const txt = fmt==="points" ? ((q.pts>=0?"+":"")+Math.round(q.pts)+"т")
+                    : fmt==="percent" ? ((q.pct>=0?"+":"")+q.pct.toFixed(2)+"%")
+                    : ((q.pnl>=0?"+":"")+q.pnl.toFixed(2)+"$");
+          pl.textContent=txt; pl.className="pb-pnl "+(q.pnl>=0?"pos":"neg"); }
       } else _pb.style.display="none"; }
       S._ordHit=[];                                         // зоны красного × для клик-отмены
       let _obN=0,_obUsd=0,_osN=0,_osUsd=0; const _ocs=S.contractSize||1;   // суммы лимиток (ВСЕ, вкл. вне экрана)
