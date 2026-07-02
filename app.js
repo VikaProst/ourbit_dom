@@ -29,7 +29,7 @@ const S = {
   showVP: true, showCols: true,   // VP и вертикальные столбцы объёма/дельты футпринта
   autoCenter: false,              // авто-центровка цены с гистерезисом (для волатильности)
   cluMode: "delta", cluTF: 1, ladMinUsd: 0,
-  tickStyle: "both", tickLine: 1.2, tickMin: 0, tickAgg: 200, tickBig: 5000, avgMode: "Fix", slPct: 0, tpPct: 0, margin: "cross", abbrev: true, fillAuto: false, fillTopN: 10, fillMult: 1, colorAuto: true, sound: false, spreadGate: 3,
+  tickStyle: "both", tickLine: 1.2, tickMin: 0, tickAgg: 200, tickBig: 5000, avgMode: "Fix", slPct: 0, tpPct: 0, slUsd: 0, margin: "cross", orderMode: "market", throwPct: 0.05, pnlFmt: "usd", abbrev: true, fillAuto: false, fillTopN: 10, fillMult: 1, colorAuto: true, sound: false, spreadGate: 3,
   // настраиваемые горячие клавиши (действие → физ.код клавиши, e.code)
   keys: { buy:"KeyT", sell:"KeyY", limitBuy:"KeyA", limitSell:"KeyS", close:"KeyD",
           reverse:"KeyR", cancel:"KeyB", center:"KeyC", be:"KeyG" },
@@ -886,6 +886,7 @@ function fillSet(){
   v("set-rowH",S.rowCss); v("set-mainMult",S.mainMult); v("set-midMult",S.midMult); v("set-range",S.range); v("set-fps",S.fps);
   v("set-fpMin",S.fpMin); v("set-lev",S.lev); v("set-size",S.size); v("set-unit",S.unit);
   v("set-margin",S.margin); v("set-avg",S.avgMode); v("set-sl",S.slPct); v("set-tp",S.tpPct);
+  v("set-slusd",S.slUsd); v("set-ordermode",S.orderMode); v("set-throw",S.throwPct); v("set-pnlfmt",S.pnlFmt);
   for(let i=0;i<5;i++) v("set-lot"+i, LOTS[i]!=null?LOTS[i]:"");
   v("set-tickstyle",S.tickStyle); v("set-tickline",S.tickLine); v("set-tickmin",S.tickMin); v("set-tickagg",S.tickAgg); v("set-tickbig",S.tickBig);
   v("set-clufillUSD",CFG.USD.cluFill); v("set-clufillCoin",CFG.coin.cluFill);
@@ -957,7 +958,9 @@ function wireSettings(){
     S.lev=parseInt($("set-lev").value,10)||S.lev;
     S.size=num("set-size",S.size); S.unit=$("set-unit").value||S.unit;
     S.margin=$("set-margin").value; S.avgMode=$("set-avg").value;
-    S.slPct=numz("set-sl",S.slPct); S.tpPct=numz("set-tp",S.tpPct);
+    S.slPct=numz("set-sl",S.slPct); S.tpPct=numz("set-tp",S.tpPct); S.slUsd=numz("set-slusd",S.slUsd);
+    { const om=$("set-ordermode"); if(om) S.orderMode=om.value||S.orderMode; S.throwPct=num("set-throw",S.throwPct);
+      const pf=$("set-pnlfmt"); if(pf) S.pnlFmt=pf.value||S.pnlFmt; }
     const nl=[]; for(let i=0;i<5;i++){ const e=$("set-lot"+i); const x=e?parseFloat(e.value):NaN; if(isFinite(x)&&x>0) nl.push(x); }
     if(nl.length) LOTS=nl;
     S.tickStyle=$("set-tickstyle").value; S.tickLine=num("set-tickline",S.tickLine);
@@ -1222,7 +1225,7 @@ function captureConfig(){
     lev:S.lev, size:S.size, unit:S.unit, hideFp:S.hideFp, fpSaved:S._fpSaved, lotsX:S.lotsX, lotsY:S.lotsY, theme:S.theme,
     tickStyle:S.tickStyle, tickLine:S.tickLine, tickMin:S.tickMin, tickAgg:S.tickAgg, tickBig:S.tickBig,
     cluMode:S.cluMode, cluTF:S.cluTF, ladMinUsd:S.ladMinUsd, fillTopN:S.fillTopN, fillMult:S.fillMult, colorAuto:S.colorAuto, sound:S.sound, spreadGate:S.spreadGate, topStab:S.topStab, topHold:S.topHold, showVP:S.showVP, showCols:S.showCols, autoCenter:S.autoCenter,
-    avgMode:S.avgMode, slPct:S.slPct, tpPct:S.tpPct, margin:S.margin, abbrev:S.abbrev, fillAuto:S.fillAuto, lots:LOTS.slice(),
+    avgMode:S.avgMode, slPct:S.slPct, tpPct:S.tpPct, slUsd:S.slUsd, orderMode:S.orderMode, throwPct:S.throwPct, pnlFmt:S.pnlFmt, margin:S.margin, abbrev:S.abbrev, fillAuto:S.fillAuto, lots:LOTS.slice(),
     keys:{...S.keys}, alerts:S._alerts,
     cfg:{USD:{...CFG.USD}, coin:{...CFG.coin}, contracts:{...CFG.contracts}} };
 }
@@ -1241,6 +1244,7 @@ function applyConfig(c){
   if(c.fillTopN!=null) S.fillTopN=c.fillTopN; if(c.fillMult!=null) S.fillMult=c.fillMult; if(c.colorAuto!=null) S.colorAuto=c.colorAuto; if(c.sound!=null) S.sound=c.sound; if(c.spreadGate!=null) S.spreadGate=c.spreadGate;
   if(c.topStab!=null) S.topStab=c.topStab; if(c.topHold!=null) S.topHold=c.topHold; if(c.showVP!=null) S.showVP=c.showVP; if(c.showCols!=null) S.showCols=c.showCols; if(c.autoCenter!=null) S.autoCenter=c.autoCenter;
   if(c.avgMode) S.avgMode=c.avgMode; if(c.slPct!=null) S.slPct=c.slPct; if(c.tpPct!=null) S.tpPct=c.tpPct;
+  if(c.slUsd!=null) S.slUsd=c.slUsd; if(c.orderMode) S.orderMode=c.orderMode; if(c.throwPct!=null) S.throwPct=c.throwPct; if(c.pnlFmt) S.pnlFmt=c.pnlFmt;
   if(c.margin) S.margin=c.margin; if(c.abbrev!=null) S.abbrev=c.abbrev; if(c.fillAuto!=null) S.fillAuto=c.fillAuto;
   if(Array.isArray(c.lots)&&c.lots.length) LOTS=c.lots.slice();
   applySymbolMeta();

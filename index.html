@@ -116,6 +116,10 @@
           <div class="setsec">Риск</div>
           <label>Стоп-Лосс, %<input type="number" id="set-sl" step="0.01"></label>
           <label>Тейк-Профит, %<input type="number" id="set-tp" step="0.01"></label>
+          <label>Авто-SL, $ (0=выкл)<input type="number" id="set-slusd" step="0.1"></label>
+          <label>Режим заявки «по рынку»<select id="set-ordermode"><option value="market">Рыночная (любая цена)</option><option value="limit">Лимитная (в рендже)</option></select></label>
+          <label>Дальность заброса, %<input type="number" id="set-throw" step="0.01"></label>
+          <label>Формат PnL<select id="set-pnlfmt"><option value="usd">USD ($)</option><option value="points">Points (тики)</option><option value="percent">Percent (%)</option></select></label>
           <label>Способ средней цены<select id="set-avg"><option>Fix</option><option>FIFO</option><option>LIFO</option><option>Dyn</option></select></label>
           <div class="setrow">
             <button class="buy" id="m-buy">BUY · T</button>
