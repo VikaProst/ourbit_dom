@@ -1,0 +1,11 @@
+# логи и кэш — не публикуем
+*.log
+srv.out.log
+srv.err.log
+__pycache__/
+*.pyc
+
+# личные настройки (у каждого свои, не раздаём)
+proxies.json
+
+# НЕ игнорируем manifest.json и update_url.txt — они нужны для авто-обновления

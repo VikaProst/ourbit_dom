@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>🐸 SQUAD TERMINAL</title>
+<link rel="stylesheet" href="/style.css?v=b107" />
+<script>try{var _s=location.search;if(_s.indexOf("dom")>=0)document.documentElement.classList.add("dom-embed");if(_s.indexOf("screener")>=0)document.documentElement.classList.add("scr-embed");}catch(e){}</script>
+</head>
+<body>
+  <header>
+    <span class="brand">🐸 SQUAD <span class="brandlite">TERMINAL</span></span>
+    <span id="chg" class="chg"></span>
+    <input id="symbol" list="symlist" placeholder="монета (BTC, ETH…)" autocomplete="off" spellcheck="false" />
+    <datalist id="symlist"></datalist>
+    <button id="stepbtn" class="cbtn" title="сжатие стакана — клик меняет">×1</button>
+    <span class="price-now" id="price">—</span>
+    <span class="flowmeter" id="flowmeter" title="давление потока (buy/sell за 4с) + сделок/сек"></span>
+    <button id="addbtn" class="gear" title="Добавить в стакан">＋ Добавить</button>
+    <button id="centerbtn" class="gear" title="Центрировать стакан на цене (горячая клавиша C)">⊙ Центр</button>
+    <button id="chartbtn" class="gear" title="график">+ График</button>
+    <button id="scrbtn" class="gear" title="Скринер — топ по обороту за 30с">📊 Скринер</button>
+    <button id="watchbtn" class="gear" title="Вочлист — избранные монеты">★ Вочлист</button>
+    <button id="finbtn" class="gear" title="Финрез — баланс, позиции, ордера">💼 Финрез</button>
+    <button id="notifbtn" class="gear" title="Лента уведомлений">🔔 <span id="notifcnt" class="notifcnt hidden">0</span></button>
+    <button id="tapebtn" class="gear" title="Лента сделок (колонки время/цена/размер)">≣ Лента</button>
+    <button id="wsbtn" class="gear" title="Раскладка — тайловое окно: панели сплиттерами">▦ Раскладка</button>
+    <button id="themebtn" class="gear" title="тема">◐ Тема</button>
+    <button id="tplbtn" class="gear" title="Шаблоны рабочего конфига">▤ Шаблоны</button>
+    <button id="gear" class="gear" title="Настройки стакана">⚙ Настройки</button>
+    <span class="status"><span class="dot" id="dot"></span><span id="statustext">подключение…</span></span>
+  </header>
+
+  <div id="tradebar">
+    <input type="password" id="token" placeholder="uc_token Ourbit (вставь свежий)" autocomplete="off" />
+    <button id="connectbtn">Подключить</button>
+    <label class="arm"><input type="checkbox" id="livebtn" disabled> LIVE</label>
+    <span id="acct" class="acct">не подключено</span>
+    <span id="posinfo" class="posinfo"></span>
+    <span id="tradelog" class="tradelog"></span>
+  </div>
+
+  <div id="bookwin" class="wbwin" style="left:6px;top:48px;width:900px;height:86vh">
+    <div class="wbtitle" id="bookdrag"><span class="wbcoin" id="booktitle">XAUT</span><span style="color:var(--muted)">· DOM</span>
+      <span id="symtabs"></span><button id="symtabadd" title="добавить вкладку текущей монеты">＋</button><span class="wbsp"></span></div>
+    <div class="wbbody" id="bookbody">
+  <div id="chartdock"></div>
+  <div id="chartdockres" title="высота графика — тянуть"></div>
+  <div id="main">
+    <div id="scroller">
+      <div id="grid">
+        <div id="fpwrap"><canvas id="fpcanvas"></canvas></div>
+        <div id="fpresize" title="ширина кластеров — потяни"></div>
+        <div id="ladder"><canvas id="ladcanvas"></canvas></div>
+        <div id="ladresize" title="ширина стакана — потяни"></div>
+      </div>
+    </div>
+    <div id="cluedge" title="тянуть — ширина/сворачивание кластеров"></div>
+  </div>
+
+  <div id="paneltools">
+    <button class="pt usd" data-act="unit" title="единицы USD / coin / контракты">$</button>
+    <button class="pt" data-act="chart" title="график (скоро)">∿</button>
+    <button class="pt" data-act="clusters" title="кластера вкл/выкл">▤</button>
+    <button class="pt" data-act="gear" title="Настройки стакана">⚙</button>
+    <button class="pt" data-act="reconnect" title="переподключить поток">↻</button>
+    <button class="pt" data-act="link" title="линковка (скоро)">⛓</button>
+    <button class="pt" data-act="notes" title="заметки (скоро)">💬</button>
+    <div class="pt6x" id="pt6x" title="сжатие — клик">×1</div>
+    <div id="pinglog" class="pinglog" title="пинг последнего ордера (мс)"></div>
+  </div>
+
+  <div id="footer">
+    <div id="delta"></div>
+    <div id="footerspacer"></div>
+    <div id="lots"><span class="lotslbl">лот $</span></div>
+  </div>
+  <div id="closemode" class="closemode" style="display:none"></div>
+  <div id="ordbar" class="ordbar" style="display:none" title="на какую сумму стоят мои лимитки в стакане">
+    <span id="ob-buy" class="ob-buy"></span><span id="ob-sell" class="ob-sell"></span>
+  </div>
+  <div id="posbar" class="posbar" style="display:none" title="цена входа · объём$ · PnL$ (реальное время)">
+    <span id="pb-entry" class="pb-entry"></span><span id="pb-val" class="pb-val"></span><span id="pb-pnl" class="pb-pnl"></span>
+  </div>
+    </div>
+    <div class="wbresize" id="bookres"></div>
+  </div>
+
+  <div class="hint">ЛКМ аск=маркет-buy · ЛКМ бид=лимит-buy · ПКМ бид=маркет-sell · Alt+клик=закрыть · колесо по заявке=отмена · T/Y рынок · A/S лимит best · D close · R reverse · G безубыток · B/Space отмена · +/− сжатие · [ ] высота строк (видимость)</div>
+
+  <div id="settings" class="modal hidden">
+    <div class="modalbox">
+      <div class="modalhead"><span>Настройки стакана</span><button id="setclose">✕</button></div>
+      <div class="settabs">
+        <button class="stab on" data-tab="trade">Торговля</button>
+        <button class="stab" data-tab="book">Стакан</button>
+        <button class="stab" data-tab="ticks">Тики</button>
+        <button class="stab" data-tab="clu">Кластера</button>
+        <button class="stab" data-tab="keys">Клавиши</button>
+        <button class="stab" data-tab="proxy">Прокси</button>
+        <button class="stab" data-tab="display">Отображение</button>
+        <button class="stab" data-tab="gen">Общие</button>
+      </div>
+      <div class="setbody">
+        <div class="stabpane on" data-pane="trade">
+          <label>Плечо<select id="set-lev"><option>10</option><option>20</option><option>50</option><option>100</option><option>200</option></select></label>
+          <label>Режим маржи<select id="set-margin"><option value="cross">Cross</option><option value="isolated">Isolated</option></select></label>
+          <label>Тип рабочего объёма<select id="set-unit"><option value="USD">USD</option><option value="coin">coin</option><option value="contracts">контракты</option></select></label>
+          <label>Текущий размер<input type="number" id="set-size"></label>
+          <div class="setsec">Рабочие объёмы (лоты)</div>
+          <label>Лот 1<input type="number" id="set-lot0"></label>
+          <label>Лот 2<input type="number" id="set-lot1"></label>
+          <label>Лот 3<input type="number" id="set-lot2"></label>
+          <label>Лот 4<input type="number" id="set-lot3"></label>
+          <label>Лот 5<input type="number" id="set-lot4"></label>
+          <div class="setsec">Риск</div>
+          <label>Стоп-Лосс, %<input type="number" id="set-sl" step="0.01"></label>
+          <label>Тейк-Профит, %<input type="number" id="set-tp" step="0.01"></label>
+          <label>Способ средней цены<select id="set-avg"><option>Fix</option><option>FIFO</option><option>LIFO</option><option>Dyn</option></select></label>
+          <div class="setrow">
+            <button class="buy" id="m-buy">BUY · T</button>
+            <button class="sell" id="m-sell">SELL · Y</button>
+            <button id="m-close">CLOSE · D</button>
+            <button id="m-rev">REV · R</button>
+            <button id="m-cancel">CANCEL · Space</button>
+          </div>
+        </div>
+        <div class="stabpane" data-pane="book">
+          <label class="chk"><input type="checkbox" id="set-fillauto"> Авто-заполненность (нормировать бары по стакану)</label>
+          <label class="chk"><input type="checkbox" id="set-colorauto"> Авто-цвет крупных (пороги оранж/красный от стакана)</label>
+          <label>Кол-во крупных заявок (авто) <span class="hintc">топ-N</span><input type="number" id="set-filltopn"></label>
+          <label>Коэффициент умножения (авто)<input type="number" id="set-fillmult" step="0.1"></label>
+          <label>Показать заявки от (USD) <span class="hintc">скрыть мелочь</span><input type="number" id="set-ladminusd"></label>
+          <div class="setsec">Заполненность (объём = 100% бара), ручной порог</div>
+          <label>Заполнение строки, USD<input type="number" id="set-fillUSD"></label>
+          <label>Крупный объём, USD <span class="hintc">оранж</span><input type="number" id="set-big1USD"></label>
+          <label>Крупный объём 2, USD <span class="hintc red">красн</span><input type="number" id="set-big2USD"></label>
+          <label>Заполнение строки, coin<input type="number" id="set-fillCoin"></label>
+          <label>Крупный объём, coin<input type="number" id="set-big1Coin"></label>
+          <label>Крупный объём 2, coin<input type="number" id="set-big2Coin"></label>
+          <div class="setsec">Сетка / уровни</div>
+          <label>Высота строки, px<input type="number" id="set-rowH"></label>
+          <label>Множитель основных уровней<input type="number" id="set-mainMult"></label>
+          <label>Множитель промежуточных<input type="number" id="set-midMult"></label>
+          <label>Кол-во уровней (в сторону)<input type="number" id="set-range"></label>
+          <label>Частота обновления, FPS <span class="hintc">меньше = спокойнее бид/аск (гиперактив → 10-12)</span><select id="set-fps"><option value="10">10</option><option value="12">12</option><option value="15">15</option><option value="20">20</option><option value="30">30</option><option value="45">45</option><option value="60">60</option></select></label>
+          <label class="chk"><input type="checkbox" id="set-topstab"> Стабилизировать бид/аск <span class="hintc">не мигать подсветкой на шуме</span></label>
+          <label class="chk"><input type="checkbox" id="set-autocenter"> Авто-центровка цены <span class="hintc">держать цену в центре (для волатильности)</span></label>
+          <label>Время удержания топа, мс <span class="hintc">больше = спокойнее, но чуть медленнее</span><input type="number" id="set-tophold" step="10"></label>
+        </div>
+        <div class="stabpane" data-pane="ticks">
+          <label>Стиль тиков<select id="set-tickstyle"><option value="both">Кружки и линии</option><option value="dots">Только кружки</option><option value="lines">Только линии</option></select></label>
+          <label>Толщина линии тиков<input type="number" id="set-tickline" step="0.5"></label>
+          <label>Показать объём тиков от (USD)<input type="number" id="set-tickmin"></label>
+          <label>Складывать тики, мсек <span class="hintc">агрегация принтов</span><input type="number" id="set-tickagg"></label>
+          <label>Крупный объём тиков (USD) <span class="hintc">порог крупного принта</span><input type="number" id="set-tickbig"></label>
+          <label class="chk"><input type="checkbox" id="set-sound"> Звук на крупный принт (buy выше / sell ниже)</label>
+        </div>
+        <div class="stabpane" data-pane="clu">
+          <label>Значение в ячейке<select id="set-clumode"><option value="delta">Дельта (buy−sell)</option><option value="sum">Сумма (общий объём)</option><option value="bs">Buy×Sell (раздельно)</option></select></label>
+          <label>Таймфрейм свечи<select id="set-clutf"><option value="1">1 мин</option><option value="2">2 мин</option><option value="5">5 мин</option><option value="15">15 мин</option></select></label>
+          <label>Заполнение кластеров, USD<input type="number" id="set-clufillUSD"></label>
+          <label>Заполнение кластеров, coin<input type="number" id="set-clufillCoin"></label>
+          <label>Минут кластеров (история)<input type="number" id="set-fpMin"></label>
+          <label class="chk"><input type="checkbox" id="set-showclu"> Показывать кластера</label>
+          <label class="chk"><input type="checkbox" id="set-showvp"> Профиль объёма (VP) — горизонт. бары по ценам</label>
+          <label class="chk"><input type="checkbox" id="set-showcols"> Столбцы объёма/дельты (вертикальные колонки)</label>
+        </div>
+        <div class="stabpane" data-pane="keys">
+          <div class="setsec">Горячие клавиши — клик по кнопке, затем нажми клавишу</div>
+          <div id="keylist" class="keylist"></div>
+          <div class="setrow"><button id="keys-reset">Сбросить по умолчанию</button></div>
+        </div>
+        <div class="stabpane" data-pane="proxy">
+          <div class="setsec">Пул прокси <span class="hintc">обход банов / гео (6002/6028)</span></div>
+          <label>Режим<select id="px-mode">
+            <option value="off">off — прямое соединение</option>
+            <option value="sticky">sticky — первый живой</option>
+            <option value="rotate">rotate — по кругу</option>
+            <option value="on_error">on_error — сменить при ошибке</option>
+          </select></label>
+          <label class="chk"><input type="checkbox" id="px-ws"> Прокси и для WebSocket <span class="hintc" id="px-wshint">(book/ленты)</span></label>
+          <div class="tplrow">
+            <input id="px-url" placeholder="http://user:pass@host:port  или  socks5://..." autocomplete="off" spellcheck="false" />
+            <button id="px-add">Добавить</button>
+          </div>
+          <div class="exnote">💡 <b>Shadowsocks</b> (как в Мете): запусти свой SS-клиент с локальным SOCKS5 (напр. порт 1080) → впиши сюда <b>socks5://127.0.0.1:1080</b> → Тест → режим sticky. Прямой прокси: socks5:// или http:// с user:pass@host:port.</div>
+          <div id="px-list" class="pxlist"></div>
+        </div>
+        <div class="stabpane" data-pane="display">
+          <div class="setsec">Темы и цвета <span class="hintc">живое применение к стакану</span></div>
+          <div id="pane-display"></div>
+        </div>
+        <div class="stabpane" data-pane="gen">
+          <label class="chk"><input type="checkbox" id="set-abbrev"> Сокращать тысячи объёмов (1.5K)</label>
+          <label>Множитель сжатия (×N)<select id="set-stepmult"><option>1</option><option>2</option><option>5</option><option>10</option><option>20</option><option>50</option><option>100</option></select></label>
+          <label>Тема<select id="set-theme"><option value="dark">тёмная</option><option value="mid">средняя</option><option value="light">светлая</option></select></label>
+        </div>
+      </div>
+      <div class="modalfoot"><button id="setapply">Применить</button></div>
+    </div>
+  </div>
+
+  <div id="templates" class="modal hidden">
+    <div class="modalbox">
+      <div class="modalhead"><span>Шаблоны — рабочий конфиг</span><button id="tplclose">✕</button></div>
+      <div class="setgrid">
+        <div class="setsec">Сохранить текущее</div>
+        <div class="tplrow">
+          <input id="tplname" placeholder="название шаблона" autocomplete="off" />
+          <button id="tplsave">Сохранить</button>
+        </div>
+        <div class="setsec">Сохранённые</div>
+        <div id="tpllist"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="chartwin" class="wbwin hidden" style="left:auto;right:20px;top:58px;width:520px;height:360px">
+    <div class="wbtitle" id="chartdrag">
+      <input class="wbcoin" id="chartsym" list="symlist" placeholder="монета" autocomplete="off" spellcheck="false" />
+      <select id="charttf"><option value="Sec1">1с</option><option value="Sec15">15с</option><option value="Sec30">30с</option><option value="Min1" selected>1м</option><option value="Min5">5м</option><option value="Min15">15м</option><option value="Min60">1ч</option></select>
+      <button class="wbx" id="chartfoot" title="футпринт-режим (per-price дельта внутри свечей, только секундные ТФ)">⊞</button>
+      <span class="wbsp"></span>
+      <button class="wbx" id="chartembed" title="встроить в окно стакана сверху / открепить">⤓</button>
+      <button class="wbx" id="chartclose">×</button>
+    </div>
+    <div class="wbbody"><canvas id="chartcv"></canvas></div>
+    <div class="wbresize" id="chartres"></div>
+  </div>
+
+  <div id="scrwin" class="wbwin hidden" style="left:auto;right:20px;top:120px;width:620px;height:520px">
+    <div class="wbtitle" id="scrdrag">
+      <span class="wbcoin">📊 СКРИНЕР</span>
+      <select id="scrwin-win" title="таймфрейм окна метрик"><option value="1" selected>M1</option><option value="3">M3</option><option value="5">M5</option><option value="15">M15</option><option value="30">M30</option><option value="60">M60</option></select>
+      <label class="scrlink"><input type="checkbox" id="scr-link"> линк</label>
+      <span class="wbsp"></span>
+      <button class="wbx" id="scrgear" title="настройки скринера">⚙</button>
+      <button class="wbx" id="scrclose">×</button>
+    </div>
+    <div class="wbbody" id="scrbody">
+      <table class="scrtbl">
+        <colgroup id="scrcolgroup"></colgroup>
+        <thead id="scrhead"></thead>
+        <tbody id="scrrows"></tbody>
+      </table>
+    </div>
+    <div class="wbresize" id="scrres"></div>
+  </div>
+  <div id="scrset" class="modal hidden">
+    <div class="modalbox">
+      <div class="modalhead"><span>Настройки скринера</span><button id="scrset-close">✕</button></div>
+      <div class="setbody">
+        <label>Название шаблона<input type="text" id="scrset-name" placeholder="мой скринер"></label>
+        <label>Кол-во монет (топ-N)<input type="number" id="scrset-topn" value="20"></label>
+        <label class="chk"><input type="checkbox" id="scrset-freeze"> Замораживать при наведении</label>
+        <label class="chk"><input type="checkbox" id="scrset-sound"> Звук при попадании под фильтр</label>
+        <label class="chk"><input type="checkbox" id="scrset-strip"> Показывать биржи в строке монеты (полоска)</label>
+        <label>Игнорировать тикер, сек<input type="number" id="scrset-mute" value="30"></label>
+        <div class="setsec">Биржи <span class="hintc">S спот / F фьючерс</span></div>
+        <div class="exgrid">
+          <div class="exrow on" data-ex="ourbit"><span>🐸 Ourbit</span><label class="exsf off">S</label><label class="exsf on" data-feed="F">F</label></div>
+          <div class="exrow" data-ex="weex"><span>WEEX</span><label class="exsf off">S</label><label class="exsf" data-feed="F">F</label></div>
+          <div class="exrow" data-ex="mexc"><span>MEXC</span><label class="exsf off">S</label><label class="exsf" data-feed="F">F</label></div>
+          <div class="exrow" data-ex="bybit"><span>Bybit</span><label class="exsf off">S</label><label class="exsf" data-feed="F">F</label></div>
+          <div class="exrow" data-ex="okx"><span>OKX</span><label class="exsf off">S</label><label class="exsf" data-feed="F">F</label></div>
+          <div class="exrow" data-ex="binance"><span>Binance</span><label class="exsf" data-feed="S">S</label><label class="exsf" data-feed="F">F</label></div>
+          <div class="exrow" data-ex="gate"><span>Gate</span><label class="exsf off">S</label><label class="exsf" data-feed="F">F</label></div>
+          <div class="exrow" data-ex="bitget"><span>Bitget</span><label class="exsf off">S</label><label class="exsf" data-feed="F">F</label></div>
+          <div class="exrow" data-ex="kucoin"><span>KuCoin</span><label class="exsf off">S</label><label class="exsf" data-feed="F">F</label></div>
+          <div class="exrow" data-ex="bingx"><span>BingX</span><label class="exsf off">S</label><label class="exsf" data-feed="F">F</label></div>
+          <div class="exrow" data-ex="htx"><span>HTX</span><label class="exsf off">S</label><label class="exsf" data-feed="F">F</label></div>
+          <div class="exrow" data-ex="bitmart"><span>BitMart</span><label class="exsf off">S</label><label class="exsf" data-feed="F">F</label></div>
+          <div class="exrow" data-ex="hyperliquid"><span>HyperLiquid</span><label class="exsf off">S</label><label class="exsf" data-feed="F">F</label></div>
+          <div class="exrow" data-ex="xt"><span>XT</span><label class="exsf off">S</label><label class="exsf" data-feed="F">F</label></div>
+          <div class="exrow" data-ex="lbank"><span>LBank</span><label class="exsf off">S</label><label class="exsf" data-feed="F">F</label></div>
+          <div class="exrow" data-ex="blofin"><span>Blofin</span><label class="exsf off">S</label><label class="exsf" data-feed="F">F</label></div>
+          <div class="exrow" data-ex="bitunix"><span>Bitunix</span><label class="exsf off">S</label><label class="exsf" data-feed="F">F</label></div>
+          <div class="exrow" data-ex="whitebit"><span>WhiteBit</span><label class="exsf off">S</label><label class="exsf" data-feed="F">F</label></div>
+          <div class="exrow" data-ex="asterdex"><span>AsterDex</span><label class="exsf off">S</label><label class="exsf" data-feed="F">F</label></div>
+          <div class="exrow" data-ex="lighter"><span>Lighter</span><label class="exsf off">S</label><label class="exsf" data-feed="F">F</label></div>
+          <div class="exrow dis" data-ex="edgex"><span>EdgeX</span><label class="exsf off">S</label><label class="exsf off">F</label></div>
+          <div class="exrow dis" data-ex="upbit"><span>UpBit</span><label class="exsf off">S</label><label class="exsf off">F</label></div>
+        </div>
+        <div class="exnote"><b>ЛКМ</b> по S/F → <b style="color:#16c784">зелёная</b>=главная: её монеты появляются в скринере (метрики+стакан по клику), приоритет Ourbit→WEEX→…. <b>ПКМ</b> → <b style="color:#ff6b66">красная ✕</b>=исключить биржу: все монеты, что торгуются на ней, <b>убираются из скринера совсем</b>. EdgeX/UpBit без публичного all-tickers. Бид/аск (спред) есть не у всех.</div>
+        <div class="setsec">Столбцы</div>
+        <div id="scrset-cols" class="scrcols"></div>
+        <div class="setsec">Фильтры (мин / макс, пусто = не применять)</div>
+        <div id="scrset-filters" class="scrfilters"></div>
+        <div class="setsec">Шаблоны</div>
+        <div class="tplrow"><select id="scrset-tpl"></select><button id="scrset-load">Загрузить</button><button id="scrset-del">Удалить</button></div>
+      </div>
+      <div class="modalfoot"><button id="scrset-reset">Сбросить</button><button id="scrset-save">Сохранить</button><button id="scrset-saveclose">Сохранить и закрыть</button></div>
+    </div>
+  </div>
+
+  <div id="tapewin" class="wbwin hidden" style="left:auto;right:20px;top:120px;width:280px;height:520px">
+    <div class="wbtitle" id="tapedrag">
+      <span class="wbcoin">≣ ЛЕНТА</span>
+      <label class="tchk"><input type="checkbox" id="tape-agg"> склеивать</label>
+      <input type="number" id="tape-minvol" placeholder="от $" title="скрыть мелкие сделки (USD)" style="width:56px">
+      <span class="wbsp"></span>
+      <button class="wbx" id="tape-live" title="к живому">▶</button>
+      <button class="wbx" id="tapeclose">×</button>
+    </div>
+    <div class="wbbody" id="tapebody"><canvas id="tapecanvas"></canvas></div>
+    <div class="wbresize" id="taperes"></div>
+  </div>
+
+  <div id="dockpreview"></div>
+  <div id="dockcross">
+    <div class="dz" data-dock="top"></div>
+    <div class="dz" data-dock="left"></div>
+    <div class="dz" data-dock="center"></div>
+    <div class="dz" data-dock="right"></div>
+    <div class="dz" data-dock="bottom"></div>
+  </div>
+
+  <div id="perfhud"></div>
+  <script src="/app.js?v=b107"></script>
+  <script src="/trade.js?v=b107"></script>
+  <script src="/dock.js?v=b107"></script>
+  <script src="/chart.js?v=b107"></script>
+  <script src="/screener.js?v=b107"></script>
+  <div id="watchwin" class="wbwin hidden" style="left:20px;right:auto;top:130px;width:260px;height:380px">
+    <div class="wbtitle" id="watchdrag">
+      <span class="wbcoin">★ ВОЧЛИСТ</span>
+      <label class="scrlink"><input type="checkbox" id="watch-link"> линк</label>
+      <span class="wbsp"></span>
+      <button class="wbx" id="watchadd" title="добавить текущую монету">＋</button>
+      <button class="wbx" id="watchclose">×</button>
+    </div>
+    <div class="wbbody" id="watchbody"><table class="scrtbl"><tbody id="watchrows"></tbody></table></div>
+    <div class="wbresize" id="watchres"></div>
+  </div>
+  <script src="/tape.js?v=b107"></script>
+  <div id="finwin" class="wbwin hidden" style="left:auto;right:20px;top:200px;width:440px;height:420px">
+    <div class="wbtitle" id="findrag"><span class="wbcoin">💼 ФИНРЕЗ</span><span class="wbsp"></span><button class="wbx" id="finclose">×</button></div>
+    <div class="wbbody" id="finbody">
+      <div id="fin-head" class="fin-head"></div>
+      <div class="fin-sec">Позиции</div><div id="fin-pos"></div>
+      <div class="fin-sec">Ордера</div><div id="fin-ord"></div>
+      <div class="fin-sec">Ваши сделки <span id="fin-trades-tot" class="fin-tot"></span></div><div id="fin-trades"></div>
+    </div>
+    <div class="wbresize" id="finres"></div>
+  </div>
+  <script src="/watchlist.js?v=b107"></script>
+  <div id="notifwin" class="wbwin hidden" style="left:auto;right:20px;top:280px;width:320px;height:340px">
+    <div class="wbtitle" id="notifdrag"><span class="wbcoin">🔔 УВЕДОМЛЕНИЯ</span><span class="wbsp"></span><button class="wbx" id="notifclr" title="очистить">🗑</button><button class="wbx" id="notifclose">×</button></div>
+    <div class="wbbody" id="notifbody"><div id="notiflist"></div></div>
+    <div class="wbresize" id="notifres"></div>
+  </div>
+  <script src="/finrez.js?v=b107"></script>
+  <script src="/notifications.js?v=b107"></script>
+  <script src="/theme.js?v=b107"></script>
+
+  <div id="wswin" class="wbwin hidden" style="left:40px;top:70px;width:1040px;height:72vh">
+    <div class="wbtitle" id="wsdrag"><span class="wbcoin">▦ РАСКЛАДКА</span>
+      <span style="color:var(--muted)">· тайл-воркспейс</span>
+      <button class="wbx" id="wsreset" title="сбросить раскладку">⟲</button>
+      <span class="wbsp"></span><button class="wbx" id="wsclose">×</button></div>
+    <div class="wbbody" id="wsbody"><div id="wsroot"></div></div>
+    <div class="wbresize" id="wsres"></div>
+  </div>
+  <script src="/tile.js?v=b107"></script>
+</body>
+</html>

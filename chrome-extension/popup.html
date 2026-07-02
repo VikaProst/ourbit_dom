@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<style>
+  body{width:300px;margin:0;background:#0b0e13;color:#e6e8ea;font:13px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;padding:14px}
+  h1{font-size:14px;margin:0 0 4px;color:#16c784}
+  .sub{color:#8a929c;font-size:11px;margin-bottom:12px}
+  button{width:100%;padding:10px;background:#16c784;color:#07120b;border:none;border-radius:7px;font-weight:700;font-size:13px;cursor:pointer}
+  button:active{transform:translateY(1px)}
+  button:disabled{opacity:.5;cursor:default}
+  .row{margin-top:10px}
+  .tok{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#9aa2ac;word-break:break-all;background:#12161d;border:1px solid #232a33;border-radius:6px;padding:6px;margin-top:6px}
+  .ok{color:#16c784} .err{color:#ff6b66}
+  .hint{color:#6a727c;font-size:10px;margin-top:10px}
+  a{color:#3ac6e6}
+</style>
+</head>
+<body>
+  <h1>🐸 SQUAD TERMINAL</h1>
+  <div class="sub">Авто-подключение терминала токеном Ourbit</div>
+  <button id="go">Подключить терминал</button>
+  <div class="row" id="status"></div>
+  <div class="tok" id="tok" style="display:none"></div>
+  <div class="hint">1) Войди на <a href="https://futures.ourbit.com" target="_blank">futures.ourbit.com</a> и открой её вкладку.<br>
+  2) Запусти локальный терминал (gc-term/server.py).<br>
+  3) Нажми «Подключить». Токен читается с открытой страницы и уходит ТОЛЬКО на твой localhost:8777.</div>
+  <script src="popup.js"></script>
+</body>
+</html>

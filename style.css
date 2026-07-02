@@ -1,0 +1,592 @@
+:root{
+  --bg:#0b0e13; --panel:#11151b; --grid:#161d26; --line:#222b36;
+  --text:#c2cad3; --muted:#5b6573;
+  --buy:#2ea043; --buy-soft:rgba(46,160,67,.20); --buy-txt:#6fcf91;
+  --sell:#e0524d; --sell-soft:rgba(224,82,77,.20); --sell-txt:#ef938f;
+  --big:#e6a943; --big-soft:rgba(230,169,67,.32); --big-txt:#f0c074;
+  --pricecol:#070a0e; --bandbid:rgba(46,160,67,.22); --bandask:rgba(224,82,77,.22);
+  --big2-soft:rgba(224,82,77,.55);
+  --rowh:14px;   /* = ROW_PX по умолчанию (rowCss 13 + 1); строка border-box ровно совпадает с холстом */
+}
+/* темы: средняя и светлая переопределяют переменные (тёмная = по умолчанию) */
+body.theme-mid{--bg:#141a22;--panel:#1b232e;--grid:#27313d;--line:#2e3a48;--text:#dbe2ea;--muted:#7a8696;--pricecol:#10161e}
+body.theme-light{--bg:#eaeef3;--panel:#dde3ea;--grid:#cbd3dd;--line:#bcc5d0;--text:#1b2330;--muted:#5f6b7a;--pricecol:#f3f6fa}
+body.theme-light .c-prc{color:#2a3340}
+body.theme-light td.mainlvl{color:#000}
+body.theme-light .bubble,body.theme-light .c-dep .txt{filter:none}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--text);
+  font:11px/1.2 Verdana,Geneva,"Segoe UI",Tahoma,sans-serif;overflow:hidden}   /* шрифт как в MetaScalp */
+
+header{display:flex;align-items:center;gap:10px;padding:6px 10px;
+  background:var(--panel);border-bottom:1px solid var(--line)}
+.brand{font-weight:800;letter-spacing:.5px;color:var(--buy);font-size:13px}
+.brandlite{color:var(--text);font-weight:700}
+.cbtn{background:#070a0e;color:var(--buy-txt);border:1px solid var(--buy);border-radius:5px;
+  padding:4px 10px;cursor:pointer;font:inherit;font-weight:700;min-width:44px}
+.cbtn:hover{background:rgba(46,160,67,.12)}
+.chg{font-weight:800;font-size:12px;padding:2px 6px;border-radius:4px;background:#0b0e13}
+.chg.up{color:#07090d;background:var(--buy)} .chg.down{color:#07090d;background:var(--sell)}
+/* вертикальная панель иконок над стаканом (как в MetaScalp) */
+/* toolbar иконок — 2 колонки (компактная сетка как в MetaScalp) */
+#paneltools{position:fixed;left:6px;top:86px;display:grid;grid-template-columns:repeat(2,27px);gap:4px;z-index:15;align-content:start}
+.pt{width:27px;height:27px;background:var(--panel);border:1px solid var(--grid);border-radius:5px;
+  color:var(--text);cursor:pointer;font-size:13px;display:flex;align-items:center;justify-content:center}
+.pt:hover{border-color:var(--buy);color:var(--buy-txt)}
+.pt.usd{color:var(--buy-txt);font-weight:800}
+.pt.act{border-color:var(--buy);color:var(--buy-txt);background:rgba(46,160,67,.14)}
+input.wbcoin{width:78px;background:#070a0e;color:var(--buy-txt);border:1px solid var(--grid);
+  border-radius:4px;padding:3px 6px;font:inherit;font-weight:700;text-transform:uppercase}
+.pt6x{grid-column:1/-1;text-align:center;color:var(--big);font-size:11px;font-weight:700;margin-top:2px;cursor:pointer}
+.pinglog{grid-column:1/-1;text-align:center;font-size:10px;font-weight:700;font-family:ui-monospace,Consolas,monospace;min-height:12px;margin-top:1px}
+select{background:#070a0e;color:var(--text);border:1px solid var(--grid);
+  border-radius:5px;padding:4px 7px;font:inherit;min-width:130px}
+#symbol{background:#070a0e;color:var(--text);border:1px solid var(--grid);border-radius:5px;
+  padding:4px 8px;font:inherit;width:150px;text-transform:uppercase}
+.price-now{font-size:16px;font-weight:700}
+.up{color:var(--buy-txt)} .down{color:var(--sell-txt)}
+.spread{color:var(--muted)}
+.spread.wide{color:#0a0d10;background:var(--buy);font-weight:800;padding:1px 6px;border-radius:4px}  /* спред широк → можно собирать */
+.flowmeter{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:700}
+.fm-bar{width:90px;height:12px;border-radius:3px;overflow:hidden;background:#1a2027;display:inline-flex}
+.fm-buy{background:var(--buy);height:100%} .fm-sell{background:var(--sell);height:100%}
+.fm-spd{color:var(--muted);font-weight:600}
+.status{margin-left:auto;display:flex;align-items:center;gap:6px;color:var(--muted)}
+.dot{width:8px;height:8px;border-radius:50%;background:#444}
+.dot.live{background:var(--buy);box-shadow:0 0 7px var(--buy)} .dot.err{background:var(--sell)}
+label.ac{color:var(--muted);cursor:pointer}
+
+#tradebar{display:flex;align-items:center;gap:8px;padding:5px 10px;
+  background:#0d1117;border-bottom:1px solid var(--line)}
+#token{flex:0 0 260px;background:#070a0e;color:var(--text);border:1px solid var(--grid);
+  border-radius:5px;padding:4px 8px;font:inherit}
+#tradebar button{background:#070a0e;color:var(--text);border:1px solid var(--grid);
+  border-radius:5px;padding:4px 10px;font:inherit;cursor:pointer}
+#connectbtn{border-color:var(--big-soft);color:var(--big)}
+.arm{display:flex;align-items:center;gap:4px;color:var(--sell-txt);font-weight:700}
+.acct{color:var(--muted)} .acct.ok{color:var(--buy-txt)}
+.posinfo{font-weight:700}
+.tradelog{margin-left:auto;color:var(--muted);font-size:10px;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* стакан внутри перетаскиваемого окна */
+#bookbody{display:flex;flex-direction:column;min-height:0;padding:0}
+#bookwin #main{flex:1;height:auto;min-height:0}
+#bookwin #footer{flex:0 0 56px}
+#bookwin #paneltools{position:absolute;left:4px;top:34px;z-index:16}
+#main{position:relative;height:calc(100vh - 41px - 33px - 56px)}
+/* единый прокручиваемый холст: футпринт(canvas) слева + стакан закреплён справа */
+#scroller{height:100%;overflow:auto;background:#2b2f36}   /* тёмно-серый фон стакана (как MetaScalp), не чёрный */
+#scroller::-webkit-scrollbar{width:10px;height:10px}
+#scroller::-webkit-scrollbar-thumb{background:#2a323d;border-radius:5px}
+#grid{display:flex;align-items:flex-start;width:max-content;min-width:100%}
+#fpwrap{flex:0 0 auto}
+#fpcanvas{display:block}
+/* видимые делители-линии: тянешь влево/вправо → меняешь ширину кластеров / стакана */
+#fpresize,#ladresize{flex:0 0 8px;align-self:stretch;cursor:col-resize;z-index:6;position:relative;
+  background:linear-gradient(90deg,transparent 0,transparent 3px,#4a5563 3px,#4a5563 5px,transparent 5px,transparent 8px)}
+#fpresize:hover,#ladresize:hover{background:linear-gradient(90deg,transparent 0,transparent 2px,var(--big) 2px,var(--big) 6px,transparent 6px,transparent 8px)}
+/* меню сжатия */
+.cmpmenu{position:fixed;z-index:9999;background:#1c1f24;border:1px solid #444;border-radius:5px;padding:5px;
+  display:flex;flex-direction:column;gap:3px;min-width:70px;box-shadow:0 8px 24px rgba(0,0,0,.5)}
+.cmpinp{background:#22252b;color:#ddd;border:1px solid #555;border-radius:3px;padding:3px 6px;font:inherit;font-size:12px;width:100%}
+.cmpmenu button{background:#2f333a;color:#ddd;border:1px solid #3a4048;border-radius:3px;padding:3px 6px;font:inherit;font-size:11px;cursor:pointer;text-align:center}
+.cmpmenu button:hover{background:#3a3f47}
+.cmpmenu button.on{color:var(--big);border-color:var(--big-soft)}
+#ladder{flex:0 0 auto;width:auto;background:#2b2f36;border-left:1px solid #3a3f47}
+#ladcanvas{display:block;cursor:crosshair}
+table.lad{width:100%;border-collapse:separate;border-spacing:0;table-layout:fixed}
+/* box-sizing:border-box → строка РОВНО --rowh с границей ВНУТРИ высоты (совпадает с ROW_PX холста 1:1) */
+table.lad td{height:var(--rowh);box-sizing:border-box;border:none;padding:0;
+  position:relative;overflow:hidden;white-space:nowrap}   /* БЕЗ линий сетки — заливки строк сомкнуты (как MetaScalp) */
+.c-dep{width:auto} .c-prc{width:80px;text-align:center;background:var(--pricecol);
+  font-weight:600;color:#aeb7c2;overflow:visible}   /* overflow:visible — чтобы бейдж % не обрезался */
+.fill{position:absolute;top:0;bottom:0}
+.c-fpb .fill{right:0;background:var(--buy-soft)}
+.c-fps .fill{left:0;background:var(--sell-soft)}
+/* заливка растёт от края к цене; КОРОТКАЯ анимация 80мс — проедание видно быстрым плавным сокращением (не рывок, не «плавает») */
+.c-dep .fill{left:0;transition:width .08s linear}
+.c-dep .fill.bid{background:var(--buy-soft)} .c-dep .fill.ask{background:var(--sell-soft)}
+.c-dep .fill.norm{background:rgba(200,210,225,.17)}   /* единый серый бар (как MetaScalp) */
+.c-dep .fill.big{background:var(--big-soft)}
+.txt{position:relative;z-index:1;line-height:var(--rowh);padding:0 5px;font-size:9px}
+.c-dep .fill.big2{background:rgba(224,82,77,.5)}   /* КРАСНЫЙ — крупный объём 2 */
+td.mainlvl{color:#fff;font-weight:700}
+td.midlvl{color:#d6dde6}
+.c-fpb .txt{text-align:right;color:var(--buy-txt)}
+.c-fps .txt{text-align:left;color:var(--sell-txt)}
+.c-dep .txt{text-align:left;color:#c9d1d9}   /* число СЛЕВА (как MetaScalp) */
+.c-dep .txt.norm{color:#c9d1d9}
+.c-dep .txt.big{color:#f3c277;font-weight:700}
+.c-dep .txt.big2{color:#f5a29e;font-weight:700}
+/* лучший бид/аск — ЯРКО выделены, спред чётко по центру */
+tr.bestbid td{background:rgba(46,160,67,.55);border-top:2px solid #3fe07a}
+tr.bestask td{background:rgba(224,82,77,.55);border-bottom:2px solid #ff5f59}
+tr.bestbid .c-prc{color:#0a0d10;font-weight:800;background:#3fe07a;box-shadow:0 0 8px rgba(63,224,122,.6)}
+tr.bestask .c-prc{color:#0a0d10;font-weight:800;background:#ff5f59;box-shadow:0 0 8px rgba(255,95,89,.6)}
+/* сжатый спред в одном уровне (высокое сжатие ×N): видно и бид, и аск */
+tr.bestmid td{background:rgba(255,210,90,.30);border-top:2px solid #3fe07a;border-bottom:2px solid #ff5f59}
+tr.bestmid .c-prc{color:#0a0d10;font-weight:800;background:linear-gradient(90deg,#3fe07a,#ff5f59);box-shadow:0 0 9px rgba(255,210,90,.7)}
+/* мягкая пульсация лучшего бид/аск — «живая» текущая цена */
+@keyframes bestpulse{0%,100%{filter:brightness(1)}50%{filter:brightness(1.28)}}
+tr.bestbid .c-prc,tr.bestask .c-prc,tr.bestmid .c-prc{animation:bestpulse 1.1s ease-in-out infinite}
+td.round{color:#fff;font-weight:700}
+.pct{position:absolute;left:0;top:0;height:100%;display:flex;align-items:center;
+  padding:0 5px;background:#5b3fd6;color:#fff;font-size:9px;font-weight:700;z-index:30;
+  white-space:nowrap;border-radius:0 3px 3px 0;box-shadow:0 0 0 1px rgba(255,255,255,.25)}
+
+/* оверлей потока: пузыри + линия траектории поверх колонки .c-flow */
+#flowlayer{position:absolute;top:0;pointer-events:none}
+#flowlayer svg{position:absolute;top:0;left:0;width:100%;height:100%;overflow:visible}
+.bubble{position:absolute;transform:translate(-50%,-50%);display:flex;
+  align-items:center;justify-content:center;border-radius:50%;font-size:9px;
+  font-weight:700;color:#07090d;border:1px solid rgba(0,0,0,.4)}
+.bubble.buy{background:var(--buy)} .bubble.sell{background:var(--sell)}
+
+/* наведение: подсвечиваем ВСЮ строку (как фиолетовая линейка MetaScalp) */
+tr.hover td{background:rgba(91,63,214,.32)!important}
+tr.hover .c-prc{color:#fff}
+tr.poslong .c-prc{box-shadow:inset 3px 0 0 var(--buy)} tr.posshort .c-prc{box-shadow:inset 3px 0 0 var(--sell)}
+tr.ordbuy .c-dep{box-shadow:inset 0 0 0 1px var(--buy)} tr.ordsell .c-dep{box-shadow:inset 0 0 0 1px var(--sell)}
+/* АЙСБЕРГ ММ (доливаемая стена: проторговано ≥ видимого, стена стоит) — статичная голубая метка слева, без мигания */
+tr.iceberg .c-dep{box-shadow:inset 4px 0 0 #4aa8e0}
+
+#footer{height:56px;display:flex;border-top:1px solid var(--line);background:var(--panel)}
+#actbtns{display:flex;flex-direction:column;flex-wrap:wrap;gap:3px;padding:4px;width:200px;
+  border-right:1px solid var(--line);align-content:flex-start}
+#actbtns button{flex:0 0 auto;border:1px solid var(--grid);border-radius:4px;background:#070a0e;
+  color:var(--text);font:inherit;font-size:10px;padding:3px 7px;cursor:pointer;min-width:92px}
+#actbtns .buy{border-color:var(--buy);color:var(--buy-txt)}
+#actbtns .sell{border-color:var(--sell);color:var(--sell-txt)}
+#sizebtns{width:104px;display:grid;grid-template-columns:1fr 1fr;gap:3px;
+  padding:4px;border-right:1px solid var(--line);align-content:start}
+#sizebtns button{background:#070a0e;color:var(--text);border:1px solid var(--grid);
+  border-radius:4px;padding:2px 0;font:inherit;font-size:10px;cursor:pointer}
+#sizebtns button.lev{color:var(--big);border-color:var(--big-soft)}
+#sizebtns button.on{outline:1px solid var(--big);color:var(--big)}
+#sizebtns .full{grid-column:1/3}
+/* дельта — узкой панелью ПОД кластерами, столбцы 1-в-1 под колонками футпринта */
+#delta{flex:0 0 auto;display:flex;align-items:stretch;overflow:hidden;
+  border-right:1px solid var(--line);background:#0a0d12}
+#footerspacer{flex:1}
+/* вертикальная панель рядом со стаканом (MetaScalp-style) */
+/* индикатор режима «заявка на закрытие» (горит пока зажата Ctrl/F) */
+.closemode{flex:0 0 16px;display:flex;align-items:center;justify-content:center;gap:4px;
+  font:600 9.5px Arial,"Segoe UI",sans-serif;letter-spacing:.2px;border-top:1px solid rgba(0,0,0,.3);
+  background:rgba(224,140,45,.10);color:#d99a3a}
+.closemode.nopos{background:rgba(120,130,140,.08);color:#8a929c}
+/* плашка сумм ЛИМИТОК (на какую сумму стоят заявки в стакане) */
+.ordbar{flex:0 0 22px;display:flex;align-items:stretch;font:700 12px Arial,"Segoe UI",Tahoma,sans-serif;border-top:1px solid #000}
+.ordbar>span{flex:1;display:flex;align-items:center;justify-content:center;gap:4px}
+.ordbar .ob-buy{background:rgba(63,224,122,.16);color:#7ff0a8}
+.ordbar .ob-sell{background:rgba(255,95,89,.15);color:#ff938d}
+/* нижняя плашка позиции (под стаканом, как MetaScalp): цена входа | объём$ | PnL$ */
+.posbar{flex:0 0 30px;display:flex;align-items:stretch;font:700 15px Arial,"Segoe UI",Tahoma,sans-serif;border-top:1px solid #000}
+.posbar>span{flex:1;display:flex;align-items:center;justify-content:center}
+.posbar .pb-entry{background:#3a4048;color:#e6e8ea}
+.posbar .pb-val{background:#2ea043;color:#04120a}
+.posbar .pb-pnl.pos{background:#2ea043;color:#04120a}
+.posbar .pb-pnl.neg{background:#e0524d;color:#1a0605}
+#lots{position:absolute;bottom:10px;left:4px;display:flex;flex-direction:column;gap:3px;width:58px;
+  background:#11151b;border:1px solid var(--line);border-radius:6px;padding:4px;z-index:20}
+#lots button{width:100%;background:#070a0e;color:var(--text);border:1px solid var(--grid);
+  border-radius:4px;padding:4px 0;cursor:pointer;font:inherit;font-size:11px;text-align:center}
+#lots .lp-lev{color:var(--big);border-color:var(--big-soft)}
+#lots .lp-usd{color:var(--buy-txt);font-weight:700}
+#lots .lp-sz.on{outline:1px solid var(--big);color:var(--big);border-color:var(--big-soft)}
+#lots .lp-edit{width:100%;background:#070a0e;color:var(--big);border:1px solid var(--big);
+  border-radius:4px;padding:4px 0;font:inherit;font-size:11px;text-align:center}
+#lots .lp-col{color:var(--big)!important;border-color:var(--big-soft)!important;background:#0b0e13!important;font-size:12px;padding:2px 0}
+#lots .lp-col:hover{background:#182018!important}
+/* делитель кластеров: тянуть влево/вправо — ширина; до края = свернуть */
+#cluedge{position:absolute;width:9px;cursor:col-resize;z-index:22;
+  background:linear-gradient(90deg,transparent 3px,#586472 3px,#586472 6px,transparent 6px)}
+#cluedge:hover{background:linear-gradient(90deg,transparent 2px,var(--big) 2px,var(--big) 7px,transparent 7px)}
+.dcol{min-width:0;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;border-left:1px solid var(--grid);padding:2px 0}
+.dtot{font-size:9px;color:#c9a14a}
+.dval{font-size:11px;font-weight:700;line-height:1.1}
+.dlbl{font-size:8px;color:var(--muted)}
+
+.hint{display:none}   /* убрано — налезало на дельту внизу */
+
+/* плавающие окна (график и т.д.) */
+.wbwin{position:fixed;background:var(--panel);border:1px solid var(--line);border-radius:8px;
+  z-index:40;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 10px 34px rgba(0,0,0,.55)}
+.wbwin.hidden{display:none}
+.wbtitle{display:flex;align-items:center;gap:8px;padding:6px 9px;background:#0d1117;
+  border-bottom:1px solid var(--line);cursor:move;user-select:none;font-size:11px}
+.wbcoin{font-weight:700;color:var(--buy-txt)}
+.wbsp{flex:1}
+.wbtitle select{background:#070a0e;color:var(--text);border:1px solid var(--grid);border-radius:4px;padding:2px 5px;font:inherit;font-size:10px}
+.wbx{background:transparent;color:var(--muted);border:none;cursor:pointer;font-size:15px;line-height:1}
+.wbx:hover{color:var(--sell)}
+.wbx.on{color:var(--buy)}
+.wbbody{flex:1;position:relative;overflow:hidden;background:#090c11}
+.wbbody canvas{display:block;width:100%;height:100%}
+.wbresize{position:absolute;right:0;bottom:0;width:16px;height:16px;cursor:nwse-resize;
+  background:linear-gradient(135deg,transparent 45%,var(--grid) 45%,var(--grid) 60%,transparent 60%)}
+
+/* ── тайловый воркспейс (докинг-дерево сплиттеров) ── */
+#wsbody{padding:0;background:#070a0e}
+#wsroot{position:absolute;inset:0;display:flex}
+.tsplit{display:flex;flex:1 1 0;min-width:0;min-height:0}
+.tsplit.trow{flex-direction:row}
+.tsplit.tcol{flex-direction:column}
+.tsplitter{flex:0 0 6px;background:#1a1f27;position:relative;z-index:2}
+.tsplitter.tsp-v{cursor:col-resize}
+.tsplitter.tsp-h{cursor:row-resize}
+.tsplitter:hover{background:var(--big)}
+.tleaf{flex:1 1 0;min-width:0;min-height:0;display:flex;flex-direction:column;
+  border:1px solid #1a1f27;background:#0b0e13;overflow:hidden}
+.tleaf-head{flex:0 0 auto;display:flex;align-items:center;gap:4px;padding:2px 4px;
+  background:#12161d;border-bottom:1px solid #1a1f27}
+.tleaf-sel{background:#070a0e;color:var(--text);border:1px solid var(--grid);border-radius:4px;
+  padding:1px 4px;font:inherit;font-size:10px}
+.tleaf-btn{background:#1a1f27;color:var(--muted);border:none;border-radius:3px;cursor:pointer;
+  width:18px;height:16px;font-size:11px;line-height:1;padding:0}
+.tleaf-btn:hover{background:var(--big);color:#07090d}
+.tleaf-body{flex:1 1 0;position:relative;min-height:0;overflow:hidden}
+.tleaf-hint{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  color:var(--muted);font-size:11px;text-align:center;padding:8px}
+.tleaf-grip{cursor:grab;color:var(--muted);font-size:12px;padding:0 3px;user-select:none}
+.tleaf-grip:hover{color:var(--big)}
+.tsdrop{position:absolute;background:rgba(230,169,67,.26);border:1.5px solid var(--big);
+  pointer-events:none;z-index:50;border-radius:3px;transition:all .06s}
+/* панель, вложенная в тайл: занимает всю ячейку, без floating-рамки/ресайза */
+.wbwin.tiled{position:absolute!important;inset:0!important;left:0!important;top:0!important;
+  right:auto;bottom:auto;width:100%!important;height:100%!important;border:none;border-radius:0;box-shadow:none;z-index:1}
+.wbwin.tiled .wbresize{display:none}
+/* докинг-крест */
+#dockcross{position:fixed;z-index:60;display:none;pointer-events:none;
+  width:124px;height:124px;left:50%;top:52%;transform:translate(-50%,-50%)}
+#dockcross .dz{position:absolute;width:38px;height:38px;background:rgba(46,160,67,.30);
+  border:1px solid var(--buy);border-radius:5px}
+#dockcross .dz[data-dock="center"]{left:43px;top:43px}
+#dockcross .dz[data-dock="top"]{left:43px;top:0}
+#dockcross .dz[data-dock="bottom"]{left:43px;top:86px}
+#dockcross .dz[data-dock="left"]{left:0;top:43px}
+#dockcross .dz[data-dock="right"]{left:86px;top:43px}
+#dockcross .dz.hot{background:rgba(46,160,67,.75)}
+#dockpreview{position:fixed;z-index:55;display:none;pointer-events:none;
+  background:rgba(46,160,67,.16);border:2px solid var(--buy);border-radius:6px;transition:all .08s}
+
+/* панель настроек стакана */
+.gear{background:#070a0e;color:var(--big);border:1px solid var(--big-soft);border-radius:5px;
+  padding:3px 9px;cursor:pointer;font:inherit}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;
+  justify-content:center;z-index:50}
+.modal.hidden{display:none}
+.modalbox{background:#11151b;border:1px solid var(--line);border-radius:8px;width:min(560px,94vw);max-height:88vh;overflow-y:auto;overflow-x:hidden}
+.modalhead{display:flex;justify-content:space-between;align-items:center;padding:9px 12px;
+  border-bottom:1px solid var(--line);font-weight:700;color:var(--big)}
+.modalhead button{background:#070a0e;color:var(--text);border:1px solid var(--grid);border-radius:5px;
+  padding:2px 8px;cursor:pointer}
+.settabs{display:flex;flex-wrap:wrap;gap:3px;padding:8px 10px 0;border-bottom:1px solid var(--line)}
+.stab{background:transparent;color:var(--muted);border:1px solid transparent;border-bottom:none;
+  border-radius:6px 6px 0 0;padding:5px 11px;cursor:pointer;font:inherit;font-size:11px}
+.stab.on{color:var(--big);background:#0b0e13;border-color:var(--line)}
+.setbody{padding:10px 12px;max-height:62vh;overflow:auto}
+.stabpane{display:none;flex-direction:column;gap:5px}
+.stabpane.on{display:flex}
+.setbody label{display:flex;justify-content:space-between;align-items:center;gap:8px;color:var(--text);font-size:11px}
+.setbody input,.setbody select{width:120px;background:#070a0e;color:var(--text);border:1px solid var(--grid);
+  border-radius:5px;padding:4px 7px;font:inherit;text-align:right}
+.setbody select{text-align:left}
+.setbody .chk{justify-content:flex-start}
+.setbody .chk input{width:auto}
+body.theme-light .setbody input,body.theme-light .setbody select{background:#fff;color:#1b2330}
+body.theme-light .modalbox{background:#e3e8ef}
+body.theme-light .tplrow input,body.theme-light #lots,body.theme-light .lp-edit{background:#fff;color:#1b2330}
+.chk{display:flex;align-items:center;gap:7px;justify-content:flex-start!important;color:var(--text);font-size:11px;cursor:pointer}
+.setgrid{display:flex;flex-direction:column;gap:5px;padding:12px}
+.setsec{color:var(--big);font-size:11px;margin-top:6px;border-bottom:1px solid var(--grid);padding-bottom:3px}
+.setgrid label{display:flex;justify-content:space-between;align-items:center;gap:8px;color:var(--text);font-size:11px}
+.setgrid input{width:108px;background:#070a0e;color:var(--text);border:1px solid var(--grid);
+  border-radius:5px;padding:4px 7px;font:inherit;text-align:right}
+.hintc{color:var(--big);font-size:9px} .hintc.red{color:var(--sell-txt)}
+.tplrow{display:flex;gap:6px}
+.tplrow input{flex:1;background:#070a0e;color:var(--text);border:1px solid var(--grid);border-radius:5px;padding:5px 8px;font:inherit}
+.tplrow button{background:#070a0e;color:var(--big);border:1px solid var(--big-soft);border-radius:5px;padding:5px 12px;cursor:pointer;font:inherit}
+#tpllist{display:flex;flex-direction:column;gap:5px;max-height:300px;overflow:auto}
+.tplitem{display:flex;align-items:center;gap:6px;background:#0b0e13;border:1px solid var(--grid);border-radius:6px;padding:6px 8px}
+.tplitem .nm{flex:1;min-width:0}
+.tplitem .nm b{color:var(--text)} .tplitem .nm small{display:block;color:var(--muted);font-size:9px}
+.tplitem button{background:#070a0e;color:var(--text);border:1px solid var(--grid);border-radius:5px;padding:4px 9px;cursor:pointer;font:inherit;font-size:11px}
+.tplitem .ld{color:var(--big);border-color:var(--big-soft)}
+.tplitem .del{color:var(--sell-txt)}
+.modalfoot{padding:10px 12px;border-top:1px solid var(--line);text-align:right}
+.modalfoot button{background:#070a0e;color:var(--big);border:1px solid var(--big-soft);
+  border-radius:5px;padding:5px 14px;cursor:pointer;font:inherit}
+.setgrid select{width:110px;background:#070a0e;color:var(--text);border:1px solid var(--grid);
+  border-radius:5px;padding:4px 7px;font:inherit}
+.setrow{display:flex;flex-wrap:wrap;gap:5px;padding-top:6px}
+.setrow button{flex:1 1 auto;min-width:80px;background:#070a0e;color:var(--text);
+  border:1px solid var(--grid);border-radius:5px;padding:5px 8px;cursor:pointer;font:inherit;font-size:11px}
+.setrow .buy{border-color:var(--buy);color:var(--buy-txt)}
+.setrow .sell{border-color:var(--sell);color:var(--sell-txt)}
+
+/* ─────────── Скринер (топ по обороту за окно) ─────────── */
+#scrbody{padding:0;overflow:auto}
+.scrtbl{width:100%;border-collapse:collapse;font:11px/1.3 ui-monospace,Consolas,monospace;table-layout:fixed}
+.scrtbl thead th{position:sticky;top:0;background:var(--panel);color:var(--muted);
+  font-weight:600;text-align:left;padding:6px 10px;border-bottom:1px solid var(--line);z-index:2;overflow:hidden;text-overflow:ellipsis}
+.scrtbl th.num,.scrtbl td.num{text-align:right}
+.scrtbl td{padding:5px 10px;border-bottom:1px solid var(--grid);cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.scrtbl td.coin{white-space:normal}                    /* монета+полоска бирж может переноситься в своей ширине */
+.colrz{position:absolute;top:0;right:0;width:7px;height:100%;cursor:col-resize;z-index:3}
+.colrz:hover{background:var(--big)}
+.scrrow:hover td{background:rgba(91,63,214,.18)}
+.scrrow.active td{background:rgba(46,160,67,.16)}
+.scrrow.scrhit td{background:rgba(230,169,67,.28);animation:scrhitfade 2.5s ease-out}
+@keyframes scrhitfade{from{background:rgba(230,169,67,.55)}to{background:rgba(230,169,67,.10)}}
+.scrtbl td.coin{font-weight:700;color:var(--text)}
+.scrtbl td.up{color:#6fcf91} .scrtbl td.down{color:#ef938f}
+.scrtbl td.amt{color:var(--big);font-weight:700}
+.scrempty{text-align:center;color:var(--muted);padding:20px}
+.scrhint{color:var(--muted);font-size:10px;margin-left:6px}
+.scrtbl td.trades{color:#7cc4ff;font-weight:800}
+
+/* Настройка горячих клавиш */
+.keylist{display:flex;flex-direction:column;gap:5px;margin-top:4px}
+.keyrow{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11px}
+.keybtn{min-width:64px;background:#070a0e;color:var(--buy-txt);border:1px solid var(--grid);border-radius:5px;padding:4px 8px;cursor:pointer;font:inherit;font-weight:700}
+.keybtn:hover{border-color:var(--buy)}
+
+/* Колоночная лента сделок */
+#tapebody{padding:0;overflow:hidden;position:relative}
+#tapecanvas{display:block;position:absolute;top:0;left:0}
+.tchk{display:inline-flex;align-items:center;gap:3px;font-size:10px;color:var(--muted);cursor:pointer}
+#tape-minvol{background:#070a0e;color:var(--text);border:1px solid var(--grid);border-radius:4px;padding:2px 4px;font:inherit;font-size:10px}
+
+/* Прокси-панель */
+.pxlist{margin-top:8px;display:flex;flex-direction:column;gap:4px;max-height:220px;overflow:auto}
+.pxrow{display:flex;align-items:center;gap:6px;padding:4px 6px;background:#22252b;border:1px solid #333;border-radius:3px;font-size:11px}
+.pxrow.dead{opacity:.55}
+.pxrow.off{opacity:.4}
+.pxdot{width:8px;height:8px;border-radius:50%;flex:0 0 auto}
+.pxdot.good{background:#5fd47a}
+.pxdot.bad{background:#e46464}
+.pxdot.unk{background:#888}
+.pxurl{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,Consolas,monospace}
+.pxinfo{flex:0 1 auto;color:#9aa;font-size:10px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pxbtn{background:#2f333a;color:#ddd;border:1px solid #444;border-radius:3px;padding:2px 6px;font:inherit;font-size:10px;cursor:pointer}
+.pxbtn:hover{background:#3a3f47}
+.pxbtn.del{color:#e46464}
+
+/* Вкладка «Отображение» — темы/цвета */
+.thbar{display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin-bottom:8px}
+.thbar select{background:#22252b;color:#ddd;border:1px solid #444;border-radius:3px;padding:3px 6px;font:inherit;font-size:11px}
+.thbtn{background:#2f333a;color:#ddd;border:1px solid #444;border-radius:3px;padding:3px 7px;font:inherit;font-size:10px;cursor:pointer}
+.thbtn:hover{background:#3a3f47}
+.thsec{border:1px solid #333;border-radius:3px;margin-bottom:5px;overflow:hidden}
+.thsechead{background:#24272d;padding:5px 8px;font-size:11px;font-weight:bold;color:#cdd2d8;cursor:pointer;user-select:none;display:flex;gap:6px;align-items:center}
+.tharrow{color:#8a929c;font-size:12px}
+.thsecbody{padding:4px 8px;display:flex;flex-direction:column;gap:3px}
+.thsecbody.collapsed{display:none}
+.throw{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:2px 0}
+.thlbl{font-size:11px;color:#bcc2c8}
+/* свотч на шахматке (видно альфу) */
+.thsw{width:46px;height:20px;border:1px solid #555;border-radius:3px;cursor:pointer;padding:0;
+  background-image:linear-gradient(45deg,#666 25%,transparent 25%),linear-gradient(-45deg,#666 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#666 75%),linear-gradient(-45deg,transparent 75%,#666 75%);
+  background-size:8px 8px;background-position:0 0,0 4px,4px -4px,-4px 0}
+.thsw::after{content:"";display:block;width:100%;height:100%;border-radius:2px;background:var(--c)}
+/* пикер */
+.thpick{position:fixed;z-index:9999;width:220px;background:#1c1f24;border:1px solid #444;border-radius:5px;padding:10px;box-shadow:0 8px 24px rgba(0,0,0,.5);display:flex;flex-direction:column;gap:6px}
+.thpreview{height:30px;border-radius:3px;
+  background-image:linear-gradient(45deg,#666 25%,transparent 25%),linear-gradient(-45deg,#666 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#666 75%),linear-gradient(-45deg,transparent 75%,#666 75%);
+  background-size:10px 10px;background-position:0 0,0 5px,5px -5px,-5px 0}
+.thpreview span{display:block;width:100%;height:100%;border-radius:3px}
+.thpickrow{display:flex;align-items:center;gap:6px}
+.thpickrow label{width:14px;font-size:11px;color:#aab}
+.thpickrow input[type=range]{flex:1}
+.thhex{width:100%;background:#22252b;color:#ddd;border:1px solid #444;border-radius:3px;padding:3px 5px;font-family:ui-monospace,Consolas,monospace;font-size:11px}
+.thpickfoot{display:flex;justify-content:flex-end}
+
+/* Докинг/сворачивание окон */
+.wbwin.collapsed{height:auto!important;min-height:0!important}
+.wbwin.collapsed .wbbody,.wbwin.collapsed .wbresize{display:none!important}
+.wbmin{cursor:pointer}
+
+/* Профайлер-HUD */
+#perfhud{position:fixed;top:82px;left:8px;z-index:9998;display:none;
+  background:rgba(10,12,16,.86);color:#7fe0a0;border:1px solid #2c4a38;border-radius:4px;
+  padding:4px 9px;font:11px ui-monospace,Consolas,monospace;pointer-events:none;letter-spacing:.2px}
+
+/* Кнопка-стрелка сворачивания панели кластеров (на кромке у стакана) */
+#trailtoggle{position:sticky;left:0;align-self:flex-start;top:2px;z-index:20;
+  width:16px;height:34px;margin-top:2px;flex:0 0 auto;
+  background:#20242b;color:#9aa2ac;border:1px solid #3a4048;border-radius:3px;
+  cursor:pointer;font-size:10px;line-height:1;padding:0;display:flex;align-items:center;justify-content:center}
+#trailtoggle:hover{background:#2b3038;color:#dfe4ea}
+
+/* поиск монеты по клику на название */
+.symsearch{position:fixed;z-index:9999;width:220px;max-height:60vh;display:flex;flex-direction:column;
+  background:#1c1f24;border:1px solid #444;border-radius:6px;box-shadow:0 8px 24px rgba(0,0,0,.5);overflow:hidden}
+.symsearch-inp{background:#22252b;color:#ddd;border:none;border-bottom:1px solid #3a4048;padding:7px 9px;font:inherit;font-size:12px;outline:none}
+.symsearch-list{overflow:auto}
+.symsearch-it{padding:5px 10px;font-size:12px;color:#cdd2d8;cursor:pointer;border-bottom:1px solid #23262c}
+.symsearch-it:hover{background:#2b3038}
+.symsearch-it.on{color:var(--big);background:rgba(46,160,67,.12)}
+
+/* контекст-меню кластеров (таймфрейм) */
+.clumenu{position:fixed;z-index:9999;background:#1c1f24;border:1px solid #444;border-radius:5px;padding:4px;
+  display:flex;flex-direction:column;min-width:110px;box-shadow:0 8px 24px rgba(0,0,0,.5)}
+.clumi{padding:5px 12px;font-size:12px;color:#cdd2d8;cursor:pointer;border-radius:3px}
+.clumi:hover{background:#2b3038}
+.clumi.on{color:var(--big);background:rgba(230,169,67,.12)}
+
+/* график, встроенный в окно стакана сверху */
+#chartdock{flex:0 0 auto;height:0;overflow:hidden;position:relative;background:#090c11}
+#chartdockres{flex:0 0 6px;display:none;cursor:row-resize;background:linear-gradient(180deg,transparent 2px,#4a5563 2px,#4a5563 4px,transparent 4px)}
+#chartdockres:hover{background:linear-gradient(180deg,transparent 1px,var(--big) 1px,var(--big) 5px,transparent 5px)}
+.wbwin.embedded{position:static!important;width:100%!important;height:100%!important;box-shadow:none;border:none;border-radius:0;left:auto!important;top:auto!important;right:auto!important}
+.wbwin.embedded .wbresize{display:none}
+
+/* ресайз окна за все углы/края */
+.rzh{position:absolute;z-index:30}
+.rzh-n{top:-3px;left:8px;right:8px;height:7px;cursor:ns-resize}
+.rzh-s{bottom:-3px;left:8px;right:8px;height:7px;cursor:ns-resize}
+.rzh-e{right:-3px;top:8px;bottom:8px;width:7px;cursor:ew-resize}
+.rzh-w{left:-3px;top:8px;bottom:8px;width:7px;cursor:ew-resize}
+.rzh-ne{top:-3px;right:-3px;width:12px;height:12px;cursor:nesw-resize}
+.rzh-nw{top:-3px;left:-3px;width:12px;height:12px;cursor:nwse-resize}
+.rzh-se{bottom:-3px;right:-3px;width:12px;height:12px;cursor:nwse-resize}
+.rzh-sw{bottom:-3px;left:-3px;width:12px;height:12px;cursor:nesw-resize}
+
+/* меню «+ Добавить» */
+.addmenu{position:fixed;z-index:9999;background:#1c1f24;border:1px solid #444;border-radius:6px;padding:4px;
+  display:flex;flex-direction:column;min-width:210px;box-shadow:0 8px 24px rgba(0,0,0,.5)}
+.addmi{padding:7px 12px;font-size:12px;color:#cdd2d8;cursor:pointer;border-radius:4px;text-align:center}
+.addmi:hover{background:#2b3038}
+/* порядок: график сверху (по умолч.) / снизу */
+#bookbody #chartdock{order:1}
+#bookbody #chartdockres{order:2}
+#bookbody #main{order:3}
+#bookbody #footer{order:4}
+#bookbody #closemode{order:5}       /* плашки — ПОД футером (внизу), иначе order:0 кидает их наверх */
+#bookbody #ordbar{order:6}
+#bookbody #posbar{order:7}
+#bookbody.chart-bottom #main{order:1}
+#bookbody.chart-bottom #chartdockres{order:2}
+#bookbody.chart-bottom #chartdock{order:3}
+#bookbody.chart-bottom #footer{order:4}
+
+/* режим «только стакан» (внутри iframe отдельного окна) — прячем шапку/трейдбар, стакан на весь iframe */
+.dom-embed header,.dom-embed #tradebar,.dom-embed .hint{display:none!important}
+.dom-embed,.dom-embed body{overflow:hidden}
+.dom-embed #bookwin{position:fixed!important;left:0!important;top:0!important;right:0!important;bottom:0!important;
+  width:100vw!important;height:100vh!important;border:none;border-radius:0}
+.dom-embed #bookwin .wbresize,.dom-embed #bookwin .wbmin{display:none}
+.dom-embed #paneltools{top:40px}
+/* режим отдельного окна СКРИНЕРА (iframe /?screener=1): только скринер на весь iframe */
+.scr-embed,.scr-embed body{overflow:hidden}
+.scr-embed body > *:not(#scrwin):not(#scrset){display:none!important}
+.scr-embed #scrwin{display:flex!important;position:fixed!important;left:0!important;top:0!important;right:0!important;bottom:0!important;
+  width:100vw!important;height:100vh!important;border:none;border-radius:0}
+.scr-embed #scrwin .wbresize,.scr-embed #scrwin .wbmin{display:none}
+/* окна отдельных стаканов */
+.domwin .wbbody{padding:0;overflow:hidden}
+.domframe{width:100%;height:100%;border:none;display:block;background:#0b0e13}
+
+/* Скринер — таблица MetaScalp-style */
+.scrtbl th{cursor:pointer;user-select:none;position:sticky;top:0}
+.scrtbl th.sorton{color:var(--big)}
+.scrtbl tbody tr:nth-child(even){background:rgba(255,255,255,.02)}
+.scrrow{cursor:pointer}
+.scrrow:hover{background:rgba(46,160,67,.10)}
+.scrrow.active{background:rgba(230,169,67,.16)}
+.scrtbl td.coin{font-weight:700;color:#dfe4ea}
+.actbar{display:inline-block;width:60px;height:9px;background:#1a2027;border-radius:3px;overflow:hidden;vertical-align:middle}
+.actbar i{display:block;height:100%;background:linear-gradient(90deg,#2ea043,#e6a943)}
+.scrlink{display:inline-flex;align-items:center;gap:3px;color:var(--muted);font-size:11px;cursor:pointer}
+.scrcols{display:grid;grid-template-columns:1fr 1fr;gap:2px}
+.scrfilters{display:flex;flex-direction:column;gap:3px}
+.scrfrow{display:flex;align-items:center;gap:6px;font-size:11px}
+.scrfrow span{flex:0 0 90px;color:var(--muted)}
+.scrfrow input{flex:1;background:#070a0e;color:var(--text);border:1px solid var(--grid);border-radius:4px;padding:3px 5px;font:inherit;width:60px}
+.scrtf{flex:0 0 auto;background:#070a0e;color:var(--big);border:1px solid var(--grid);border-radius:4px;padding:2px 3px;font:inherit;font-size:10px}
+
+/* биржи в скринере: бейдж + сетка настроек */
+.exbadge{position:relative;display:inline-flex;align-items:center;justify-content:center;
+  width:15px;height:15px;border-radius:4px;margin-right:6px;vertical-align:middle;overflow:hidden;flex:0 0 auto}
+.exbadge .exico{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#fff}
+.exbadge .exmono{font-size:8px;font-weight:800;color:#07090d;line-height:1;letter-spacing:-.5px}
+/* полоска бирж, где торгуется монета (как в MetaScalp) */
+.scrsym{font-weight:700;margin-right:6px}
+.exstrip{display:inline-flex;flex-wrap:wrap;gap:2px;vertical-align:middle;max-width:340px}
+.exmini{display:inline-flex;align-items:center;height:13px;border-radius:3px;overflow:hidden;background:#0b0e13;border:1px solid #222}
+.exmini .exminico{width:12px;height:13px;object-fit:contain;background:#fff}
+.exmini .exminimono{display:inline-flex;width:12px;height:13px;align-items:center;justify-content:center;font-size:7px;font-weight:800;color:#07090d}
+.exmini .exminil{width:9px;text-align:center;font-size:8px;font-weight:800;font-style:normal;line-height:13px}
+.exmini .exminil.f{color:#16c784}
+.exmini .exminil.s{color:#e6a943}
+.exrow{cursor:default}
+.exrow[data-ex]{cursor:pointer}
+.exrow[data-ex] .exsf[data-feed]{cursor:pointer}
+.exgrid{display:grid;grid-template-columns:1fr 1fr;gap:3px}
+.exrow{display:flex;align-items:center;gap:6px;padding:4px 7px;background:#22252b;border:1px solid #333;border-radius:4px;font-size:11px}
+.exrow span{flex:1;color:#cdd2d8}
+.exrow.dis{opacity:.4}
+.exsf{width:18px;height:16px;display:inline-flex;align-items:center;justify-content:center;border-radius:3px;font-size:10px;font-weight:700}
+.exsf.on{background:var(--buy);color:#07090d}
+.exsf.off{background:#2f333a;color:#6a727c;border:1px solid #3a4048}
+.exsf.excl{background:#3a1414;color:#ff6b66;border:1px solid #5a2020;text-decoration:line-through}
+.exrow[data-ex] .exsf[data-feed]{cursor:pointer;background:#2f333a;color:#9aa2ac;border:1px solid #3a4048}
+.exrow[data-ex] .exsf.on{background:var(--buy);color:#07090d;border-color:transparent}
+.exrow[data-ex] .exsf.excl{background:#3a1414;color:#ff6b66;border-color:#5a2020}
+.exnote{color:var(--muted);font-size:10px;margin:4px 0 2px}
+
+/* вочлист */
+#watchbody{overflow:auto}
+.wl-x{cursor:pointer;color:#6a727c;width:20px}
+.wl-x:hover{color:var(--sell)}
+
+/* Финрез */
+#finbody{overflow:auto;padding:6px 8px}
+.fin-head{display:flex;gap:12px;margin-bottom:6px}
+.fin-bal{display:flex;flex-direction:column;font-size:10px;color:var(--muted)}
+.fin-bal b{font-size:14px;color:var(--text)}
+.fin-off{color:var(--sell-txt);font-size:11px}
+.fin-sec{color:var(--big);font-size:10px;font-weight:700;margin:6px 0 3px;border-top:1px solid #222b36;padding-top:4px}
+.fin-empty{color:var(--muted);font-size:11px;padding:3px 0}
+#finbody{overflow-y:auto}                 /* вся история пролистывается */
+.fin-tot{font-weight:400;font-size:11px;color:var(--muted)}
+.fin-tot b{font-weight:700}
+table.fintr{width:100%;border-collapse:collapse;font-size:11px}
+table.fintr thead td{color:#8899a6;font-size:9px;font-weight:700;text-transform:uppercase;padding:2px 4px;border-bottom:1px solid #222b36}
+table.fintr td{padding:2px 4px}
+table.fintr td.num{text-align:right;font-variant-numeric:tabular-nums}
+table.fintr td.coin{color:#e6e8ea;font-weight:600}
+table.fintr .fin-fee{color:#c9a26b}
+table.fintr .up{color:#3fe07a}
+table.fintr .down{color:#ff5f59}
+table.fintr tbody tr:nth-child(even){background:rgba(255,255,255,.02)}
+.fin-cancel{cursor:pointer;color:#6a727c}
+.fin-cancel:hover{color:var(--sell)}
+
+/* уведомления */
+.notifcnt{background:var(--sell);color:#fff;border-radius:8px;font-size:9px;padding:0 4px;margin-left:2px}
+#notifbody{overflow:auto;padding:4px 6px}
+.ntf{padding:4px 6px;border-bottom:1px solid #1a212b;font-size:11px;color:#cdd2d8}
+.ntf-t{color:var(--muted);margin-right:6px;font-size:10px}
+.ntf-alert{color:var(--big-txt)}
+.ntf-shot{color:#7fd4a0}
+
+/* табы инструментов в шапке стакана */
+#symtabs{display:inline-flex;gap:3px;margin-left:8px;flex-wrap:nowrap;overflow:hidden}
+.symtab{display:inline-flex;align-items:center;gap:3px;background:#0b0e13;border:1px solid var(--grid);border-radius:4px;
+  padding:1px 6px;font-size:10px;font-weight:700;color:var(--muted);cursor:pointer}
+.symtab.on{color:var(--big);border-color:var(--big-soft);background:rgba(230,169,67,.10)}
+.symtab-x{color:#5a636e;font-style:normal;font-size:11px}
+.symtab-x:hover{color:var(--sell)}
+#symtabadd{background:#0b0e13;border:1px solid var(--grid);border-radius:4px;color:var(--muted);cursor:pointer;font-size:11px;padding:0 6px;margin-left:4px}
+#symtabadd:hover{color:var(--buy-txt);border-color:var(--buy)}
+
+/* плашки слева от стакана: % ховера и Mark Price (вне канваса) */
+.edgelbl{position:fixed;z-index:40;pointer-events:none;display:none;
+  background:#5b3fd6;color:#fff;font:bold 11px ui-monospace,Consolas,monospace;padding:1px 5px;border-radius:3px;white-space:nowrap}
+.edgelbl.mp{background:rgba(88,120,200,.95);font-weight:700}
+
+/* разделитель в меню Добавить */
+.addmi.addsep{color:#3a4048;cursor:default;padding:2px 12px;text-align:center;pointer-events:none}

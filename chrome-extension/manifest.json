@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "SQUAD TERMINAL — авто-подключение Ourbit",
+  "version": "1.0.0",
+  "description": "Считывает токен с открытой страницы Ourbit и подключает локальный терминал (localhost:8777). Данные никуда не уходят, только на твой ПК.",
+  "permissions": ["cookies", "scripting", "activeTab", "storage", "tabs"],
+  "host_permissions": [
+    "https://*.ourbit.com/*",
+    "http://localhost:8777/*",
+    "http://127.0.0.1:8777/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "SQUAD TERMINAL — подключить"
+  }
+}
