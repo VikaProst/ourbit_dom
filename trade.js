@@ -179,6 +179,10 @@ function checkRisk(){
   let hit=null;
   if(long){ if(sl!=null&&px<=sl)hit="SL"; else if(be!=null&&px<=be)hit="БУ"; else if(tp!=null&&px>=tp)hit="TP"; }
   else    { if(sl!=null&&px>=sl)hit="SL"; else if(be!=null&&px>=be)hit="БУ"; else if(tp!=null&&px<=tp)hit="TP"; }
+  if(!hit && S.slUsd>0 && T.pos.vol){   // авто-SL по ДОЛЛАРАМ (закрыть при убытке ≥ $X, независимо от %)
+    const pu=(px-avg)*T.pos.vol*(S.contractSize||1)*(long?1:-1);
+    if(pu <= -Math.abs(S.slUsd)) hit="SL$";
+  }
   if(hit && !_riskFired){ _riskFired=true; log(`${hit} @${px.toFixed(S.dec)} — закрываю`,"ok"); closePos();
     setTimeout(()=>{ _riskFired=false; }, 2500);   // разблокировать повтор: если закрытие не прошло — checkRisk попробует снова
   }
