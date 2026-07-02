@@ -294,8 +294,11 @@ _ACT = {"ok": False, "ts": 0.0}
 
 def _act_cfg(fname):
     try:
-        v = open(os.path.join(HERE, fname), encoding="utf-8").read().strip()
-        return v if (v and not v.startswith("#")) else ""
+        for line in open(os.path.join(HERE, fname), encoding="utf-8").read().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):   # ПЕРВАЯ непустая строка без # (комментарий в файле не ломает чтение ключа)
+                return line
+        return ""
     except Exception:
         return ""
 
@@ -1427,6 +1430,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "balance": avail, "equity": equity,
                             "positions": _OB.positions(sym), "orders": _OB.open_orders(sym),
                             "allpos": _OB.positions(None)})    # ВСЕ позиции по всем монетам (чтобы не терять «чужие» позы)
+            elif route == "/api/posmode":        # текущий режим позиции (1 hedge / 2 one-way)
+                if not _TRADE["connected"]:
+                    self._json({"ok": False, "error": "не подключено"}); return
+                self._json({"ok": True, "mode": _OB.get_position_mode()})
             elif route == "/api/plandiag":       # ДИАГНОСТИКА план-ордеров (найти верное поле id для отмены)
                 if not _TRADE["connected"]:
                     self._json({"ok": False, "error": "не подключено"}); return
@@ -1480,6 +1487,14 @@ class Handler(BaseHTTPRequestHandler):
                 if on:
                     threading.Thread(target=_OB.warm, daemon=True).start()   # прогреть соединение при включении LIVE — 1-й ордер сразу быстрый
                 self._json({"ok": True, "state": _trade_state()})
+            elif route == "/api/setposmode":     # сменить режим позиции (1 hedge / 2 one-way) — только когда флэт
+                if not _TRADE["connected"]:
+                    self._json({"ok": False, "error": "не подключено"}); return
+                try:
+                    sc, resp = _OB.set_position_mode(int(b.get("mode", 2)))
+                    self._json({"ok": bool(resp.get("success")), "resp": resp})
+                except Exception as exc:
+                    self._json({"ok": False, "error": str(exc)})
             elif route == "/api/closeall":       # НАДЁЖНОЕ закрытие: сервер сам берёт ВСЕ позиции с биржи и закрывает (не зависит от клиента)
                 if not _TRADE["armed"]:
                     self._json({"ok": False, "error": "LIVE не включён"}); return
@@ -1488,6 +1503,8 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as exc:
                     self._json({"ok": False, "error": "не смог прочитать позиции: " + str(exc)}); return
                 closed, errs = 0, []
+                syms = set(p.get("symbol") for p in poslist if p.get("symbol"))
+                if b.get("symbol"): syms.add(b.get("symbol"))   # + текущая монета клиента
                 for p in poslist:
                     cside = 4 if p.get("side") == 1 else 2   # 4=close long / 2=close short
                     try:
@@ -1497,7 +1514,14 @@ class Handler(BaseHTTPRequestHandler):
                         else: errs.append(f"{p.get('symbol')}: {resp.get('message') or resp.get('code')}")
                     except Exception as exc:
                         errs.append(f"{p.get('symbol')}: {exc}")
-                self._json({"ok": True, "closed": closed, "found": len(poslist), "errors": errs})
+                cancelled = 0                              # + снять ВСЕ лимитки по этим монетам (иначе доливают позу обратно!)
+                for s in syms:
+                    try:
+                        for o in _OB.open_orders(s):
+                            _OB.cancel(o["id"]); cancelled += 1
+                    except Exception: pass
+                self._json({"ok": True, "closed": closed, "found": len(poslist),
+                            "cancelled_orders": cancelled, "errors": errs})
             elif route == "/api/order":
                 if not _TRADE["armed"]:
                     self._json({"ok": False, "error": "LIVE не включён"}); return
@@ -1508,6 +1532,11 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"ok": False, "error": "плохие параметры ордера"}); return
                 if vol <= 0 or vol > _MAX_VOL:
                     self._json({"ok": False, "error": f"vol вне лимита (1..{_MAX_VOL})"}); return
+                try:   # ЛОГ каждого ордера (диагностика авто-открытия): время, сторона, объём, монета
+                    with open(os.path.join(HERE, "order_log.txt"), "a", encoding="utf-8") as _lf:
+                        _lf.write(f"{time.strftime('%H:%M:%S')} ORDER side={side} otype={otype} vol={vol} sym={sym} px={b.get('price')}\n")
+                except Exception:
+                    pass
                 _t0 = time.time()
                 try:
                     close_pid = None

@@ -136,6 +136,15 @@ class ObClient:
                             "symbol": p.get("symbol") or (symbol or "")})
         return out
 
+    def get_position_mode(self):
+        """Текущий режим позиции: 1 = Hedge (хедж), 2 = One-way (односторонний)."""
+        _, d = self._get("/private/position/position_mode")
+        return d
+
+    def set_position_mode(self, mode):
+        """Сменить режим позиции (только когда нет позиций/ордеров). 1=hedge, 2=one-way."""
+        return self._post("/private/position/change_position_mode", {"positionMode": int(mode)})
+
     def open_orders(self, symbol):
         _, d = self._get("/private/order/list/open_orders", {"symbol": symbol, "page_num": 1, "page_size": 50})
         rows = d.get("data") or []

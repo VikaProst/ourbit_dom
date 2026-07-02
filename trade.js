@@ -81,18 +81,34 @@ async function sendOrder(side, otype, price, label, volOverride, positionId, sym
   else { _riskFired=false; log(`❌ ${label}: ${r.error||JSON.stringify(r.resp&&r.resp.message||r.resp)}`,"err"); }
   refreshAccount();
 }
-const marketBuy =()=>sendOrder(SIDE.OPEN_LONG, OT.MARKET, 0, "BUY рынок");
-const marketSell=()=>sendOrder(SIDE.OPEN_SHORT,OT.MARKET, 0, "SELL рынок");
-const limitBuy =(p)=>sendOrder(SIDE.OPEN_LONG, OT.LIMIT, p, "лимит BUY @"+snapPx(p));
-const limitSell=(p)=>sendOrder(SIDE.OPEN_SHORT,OT.LIMIT, p, "лимит SELL @"+snapPx(p));
+// POSITION-AWARE (эмуляция one-way в хедж-режиме): действие ПРОТИВ позиции = ЗАКРЫТЬ её (reduce-only), НЕ открыть противоположную.
+// Убирает баг «продаю чтобы закрыть лонг — открывает шорт». Ourbit не даёт включить one-way, поэтому эмулируем в терминале.
+function _posClose(wantBuy){
+  const p=T.pos;
+  if(p && p.vol>0){
+    if(p.side===1 && !wantBuy) return {side:SIDE.CLOSE_LONG,  vol:p.vol, id:p.id, txt:"CLOSE LONG"};   // ЛОНГ + продажа = закрыть лонг
+    if(p.side===2 && wantBuy)  return {side:SIDE.CLOSE_SHORT, vol:p.vol, id:p.id, txt:"CLOSE SHORT"};  // ШОРТ + покупка = закрыть шорт
+  }
+  return null;   // нет позиции ИЛИ клик ПО направлению позиции → открыть/добавить
+}
+function _openMarket(buy){   // маркет-открытие с учётом режима (Рыночная / Лимитная-в-рендже)
+  if(S.orderMode==="limit"){ const px=(buy?(S.bestAsk||S.bestBid):(S.bestBid||S.bestAsk))||0;
+    const p=buy?px*(1+(S.throwPct||0.05)/100):px*(1-(S.throwPct||0.05)/100);
+    sendOrder(buy?SIDE.OPEN_LONG:SIDE.OPEN_SHORT, OT.IOC, p, (buy?"BUY":"SELL")+" лимит-рендж @"+snapPx(p)); }
+  else sendOrder(buy?SIDE.OPEN_LONG:SIDE.OPEN_SHORT, OT.MARKET, 0, (buy?"BUY":"SELL")+" рынок");
+}
+function marketBuy(){  const c=_posClose(true);  if(c) sendOrder(c.side, OT.MARKET, 0, c.txt+" (рынок)", c.vol, c.id); else _openMarket(true); }
+function marketSell(){ const c=_posClose(false); if(c) sendOrder(c.side, OT.MARKET, 0, c.txt+" (рынок)", c.vol, c.id); else _openMarket(false); }
+function limitBuy(p){  const c=_posClose(true);  if(c) sendOrder(c.side, OT.LIMIT, p, c.txt+" лимит @"+snapPx(p), c.vol, c.id); else sendOrder(SIDE.OPEN_LONG,  OT.LIMIT, p, "лимит BUY @"+snapPx(p)); }
+function limitSell(p){ const c=_posClose(false); if(c) sendOrder(c.side, OT.LIMIT, p, c.txt+" лимит @"+snapPx(p), c.vol, c.id); else sendOrder(SIDE.OPEN_SHORT, OT.LIMIT, p, "лимит SELL @"+snapPx(p)); }
 async function closePos(){                                     // D / Alt+клик: закрытие ЧЕРЕЗ СЕРВЕР — он сам берёт ВСЕ позиции с биржи и закрывает (надёжно, не зависит от клиентского T.allpos)
   if(!T.armed){ log("✋ LIVE off"); return; }
   const t0=(window.performance?performance.now():Date.now());
-  const r=await postJSON("/api/closeall",{leverage:S.lev});
+  const r=await postJSON("/api/closeall",{leverage:S.lev, symbol:S.symbol});
   const ms=Math.round((window.performance?performance.now():Date.now())-t0); showPing(ms, !!(r&&r.ok));
   if(r&&r.ok){
-    log(`закрыто позиций: ${r.closed}/${r.found}`+(r.errors&&r.errors.length?" ⚠ "+r.errors.join("; "):""), (r.errors&&r.errors.length)?"err":"ok");
-    T.pos=null; T.allpos=[]; S._render=true;                   // оптимистично убрать
+    log(`закрыто ${r.closed}/${r.found}, снято лимиток ${r.cancelled_orders||0}`+(r.errors&&r.errors.length?" ⚠ "+r.errors.join("; "):""), (r.errors&&r.errors.length)?"err":"ok");
+    T.pos=null; T.allpos=[]; T.orders=[]; S._render=true;      // оптимистично обнулить всё
   } else log("ошибка закрытия: "+((r&&r.error)||"—"),"err");
   refreshAccount();
 }
@@ -256,8 +272,10 @@ function wireKeys(){
     const sc=document.getElementById("scroller"), code=e.code, K=S.keys||{};
     if(code==="KeyF"){ window.fHeld=true; updateCloseMode(); return; }   // ЗАЖАТЬ F = режим «заявка на закрытие»: клик по цене ставит reduce-only лимитку на весь объём позиции
     if(code==="ControlLeft"||code==="ControlRight"){ window.ctrlHeld=true; updateCloseMode(); return; }   // ЗАЖАТЬ Ctrl = тот же режим (индикатор внизу загорается)
+    if(e.ctrlKey||e.metaKey||e.altKey) return;   // 🔴 КРИТ: НЕ выполнять торговые клавиши с Ctrl/Alt/Meta (Ctrl+Shift+R=перезагрузка дёргала R=реверс→открывала позу! Ctrl+A/S тоже)
     // настраиваемые торговые действия (по физ.коду, работает на любой раскладке)
-    for(const act in ACT){ if(code===K[act]){ if(act==="center") e.preventDefault(); ACT[act](); return; } }
+    for(const act in ACT){ const kk=K[act]||(typeof DEFAULT_KEYS!=="undefined"?DEFAULT_KEYS[act]:null);   // фолбэк на дефолт → новые клавиши (W/E/N) работают без сброса сохранённых
+      if(kk && code===kk){ if(act==="center") e.preventDefault(); ACT[act](); return; } }
     switch(code){   // фиксированные служебные
       case "F9": e.preventDefault(); if(window.togglePerf) togglePerf(); break;   // встроенный профайлер (FPS/ms/пропуски)
       case "KeyH": window.hHeld=true; break;   // зажать H + колесо над стаканом = сжать/разжать
