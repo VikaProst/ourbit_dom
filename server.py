@@ -589,6 +589,13 @@ def _screener_top(win_min: float = 1.0, n: int = 40, tfs: dict = None) -> list:
         a = (_ACT_W["trades"] * r["trades"] / mtr + _ACT_W["amt"] * r["amt"] / mam +
              _ACT_W["natr"] * min(1.0, r["natr"] / mna) + _ACT_W["vspike"] * min(1.0, r["vspike"] / mvs))
         r["act"] = round(min(100.0, a * 100))
+        # СБОР-СКОР (стратегия сбора спреда «ARPA-подобные»): жирный тик × прострелы × свипы, гейт по ликвидности.
+        # Идея: низкая цена → 1 тик = жирный % (spread%), активная волатильность (natr) даёт прострелы-филлы, всплеск = свипы через стенки.
+        liq = 0.0 if r["amt"] < 15000 else min(1.0, r["amt"] / 150000.0)   # <$15k оборота = мёртвая, отсекаем; плавно к 1 на $150k
+        spr = min(1.0, r["spread"] / 0.12)     # спред(тик)% 0.12%+ = жирный тик
+        vol = min(1.0, r["natr"] / 2.5)        # NATR 2.5%+ = активные прострелы
+        vsp = min(1.0, r["vspike"] / 250.0)    # всплеск x2.5 = свипы
+        r["scoll"] = round(min(100.0, (0.50 * spr + 0.32 * vol + 0.18 * vsp) * liq * 100))
     rows.sort(key=lambda r: (r["amt"], r["trades"]), reverse=True)
     return rows[:n]
 
