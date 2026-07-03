@@ -94,8 +94,10 @@ function aggregateTicks(ticks, aggMs){
       const nv=last.v+tk.v;
       last.p=(last.p*last.v + tk.p*tk.v)/nv;   // средневзвешенная цена принта
       last.v=nv; last.t=tk.t;                  // объём суммируем, время — последнее
+      if(tk.p>last.pHi) last.pHi=tk.p;         // РАЗМАХ СВИПА: докуда дошёл прострел вверх по стакану
+      if(tk.p<last.pLo) last.pLo=tk.p;         // …и вниз — высота пузыря = сколько уровней прошил
     } else {
-      out.push({p:tk.p, v:tk.v, side:tk.side, t:tk.t, _t0:tk.t});
+      out.push({p:tk.p, v:tk.v, side:tk.side, t:tk.t, _t0:tk.t, pHi:tk.p, pLo:tk.p});
     }
   }
   return out;
@@ -809,34 +811,37 @@ function renderFootprint(){
   if(S.bbS){ const yb=(topS-S.bbS+0.5)*rowH; if(yb>=0&&yb<=h){ g.strokeStyle="rgba(46,160,67,.55)"; g.beginPath(); g.moveTo(0,yb); g.lineTo(W,yb); g.stroke(); } }
   g.setLineDash([]);
 
-  // ── зона ленты (тики-пузыри): новые СПРАВА, старые влево ──
-  const ticks=aggregateTicks(S.flow.ticks||[], S.tickAgg); const SP=30, mg=18;
-  const maxN=Math.max(1,Math.floor((tapeW-mg)/SP));
-  const recent=ticks.filter(tk=>unitVal(tk.v,tk.p)>=(S.tickMin||0)).slice(-maxN).reverse();  // фильтр мелких + новейшие справа
-  const pts=[];
-  for(let i=0;i<recent.length;i++){ const tk=recent[i]; const x=W-mg-i*SP;   // равный шаг, новые справа (как MetaScalp)
-    if(x<fpW+6) break;                                   // ушли за футпринт — клип
-    const ps=tk.p/step;                                  // ТОЧНАЯ цена сделки (дробная позиция)
-    const y=(ps>topS+0.5||ps<botS-0.5)?null:(topS-ps+0.5)*rowH;
-    pts.push([x,y,tk]); }
-  // линия-траектория через центры пузырей (как у MetaScalp — путь цены по сделкам)
-  const vis=pts.filter(p=>p[1]!=null);
-  if(S.tickStyle!=="dots" && vis.length>1){ g.strokeStyle="rgba(185,195,210,.65)"; g.lineWidth=(S.tickLine||1.2)+0.4; g.beginPath();
-    vis.forEach((p,i)=> i?g.lineTo(p[0],p[1]):g.moveTo(p[0],p[1])); g.stroke(); }
-  // пузыри: на СВОЕЙ цене, узкие (rx мал), высокие при крупном объёме (ry ∝ объём) — 1:1 как MetaScalp
-  g.textAlign="center";
-  const bigT=S.tickBig||cfg.big2;
-  if(S.tickStyle!=="lines") for(let i=0;i<pts.length;i++){ const [x,y,tk]=pts[i]; if(y==null) continue; const uv=unitVal(tk.v,tk.p);
-    const mag=Math.sqrt(Math.max(0,uv)/bigT);         // 1 = «крупный объём тиков»
-    const rx=11+Math.min(1,mag)*8;                    // 11..19 круглый пузырь (крупные — как MetaScalp)
-    const ry=Math.min(88, rx + Math.max(0,mag-1)*34); // вытягиваем в высокий эллипс ТОЛЬКО крупные (>порога)
-    g.beginPath(); g.ellipse(x,y,rx,ry,0,0,6.2832);
-    g.fillStyle=tk.side===1?"#2ea043":"#e0524d"; g.fill();
-    g.strokeStyle=tk.side===1?"rgba(255,255,255,.3)":"rgba(255,255,255,.22)"; g.lineWidth=1.2; g.stroke();
-    // шрифт подгоняем, чтобы объём влез в пузырь и читался
-    const label=fmt(uv); let fs=10; g.font=fs+"px Verdana,Geneva,sans-serif";
-    while(fs>7 && g.measureText(label).width>rx*2-5){ fs--; g.font=fs+"px Verdana,Geneva,sans-serif"; }
-    g.fillStyle="#07090d"; g.fillText(label,x,y); }
+  // ── зона ленты (тики-пузыри): новые СПРАВА, ПЛОТНАЯ цепочка с нахлёстом (как MetaScalp) ──
+  const ticks=aggregateTicks(S.flow.ticks||[], S.tickAgg); const mg=14, PACK=0.8;
+  const refV=Math.max(1, S.tickBig||cfg.big2);        // «крупный» ориентир; настраивается S.tickBig
+  const recent=ticks.filter(tk=>unitVal(tk.v,tk.p)>=(S.tickMin||0)).slice(-160).reverse();  // новейшие справа
+  const CGRN="#3fbf5f", CGRN_E="#2c9748", CRED="#ef5f5a", CRED_E="#cc4a45";   // плоские цвета MetaScalp (заливка + ободок)
+  // РАСКЛАДКА: шаг между центрами = сумма радиусов × PACK (плотно, с нахлёстом), новые справа
+  const bub=[]; let cx=W-mg, prevRx=0;
+  for(let i=0;i<recent.length;i++){ const tk=recent[i]; const uv=unitVal(tk.v,tk.p);
+    const m=Math.sqrt(Math.max(uv,1)/refV);
+    const rx=Math.max(9, Math.min(34, 12*m+7));       // ширина ∝ √объём
+    cx = (i===0) ? (W-mg-rx) : (cx - (prevRx+rx)*PACK);  prevRx=rx;
+    if(cx-rx < fpW+3) break;                          // ушли за футпринт — стоп
+    const pHi=(tk.pHi!=null?tk.pHi:tk.p), pLo=(tk.pLo!=null?tk.pLo:tk.p);
+    const yHi=(topS-pHi/step+0.5)*rowH, yLo=(topS-pLo/step+0.5)*rowH;
+    const cy=(yHi+yLo)/2, span=Math.abs(yLo-yHi);
+    const ry=Math.max(rx, Math.min(h*0.5, span/2+rx*0.7));  // свип по стакану → столб; точка → круг
+    bub.push({x:cx, cy, rx, ry, tk, uv}); }
+  // линия-траектория через центры (путь цены по сделкам)
+  if(S.tickStyle!=="dots" && bub.length>1){ g.strokeStyle="rgba(185,195,210,.6)"; g.lineWidth=(S.tickLine||1.2)+0.4;
+    g.beginPath(); bub.forEach((b,i)=> i?g.lineTo(b.x,b.cy):g.moveTo(b.x,b.cy)); g.stroke(); }
+  // пузыри: ПЛОСКИЕ (заливка + тонкий ободок, без 3D), от СТАРЫХ к НОВЫМ → новые сверху при нахлёсте
+  g.textAlign="center"; g.textBaseline="middle";
+  if(S.tickStyle!=="lines") for(let i=bub.length-1;i>=0;i--){ const {x,cy,rx,ry,tk,uv}=bub[i];
+    const buy=tk.side===1;
+    g.beginPath(); g.ellipse(x,cy,rx,ry,0,0,6.2832);
+    g.fillStyle=buy?CGRN:CRED; g.fill();
+    g.strokeStyle=buy?CGRN_E:CRED_E; g.lineWidth=1; g.stroke();
+    const label=fmt(uv); let fs=Math.max(8,Math.min(14,Math.round(rx*1.0))); g.font="bold "+fs+"px Verdana,Geneva,sans-serif";
+    while(fs>8 && g.measureText(label).width>rx*2-4){ fs--; g.font="bold "+fs+"px Verdana,Geneva,sans-serif"; }
+    g.fillStyle="#0b0e13"; g.fillText(label,x,cy); }
+  g.font="9px Verdana,Geneva,sans-serif"; g.textBaseline="alphabetic";
 
   // ── ДЕТЕКТОР ПРОСТРЕЛА: за ~500мс одна сторона набила > порога → метка «куда стрельнуло» (для лесенки под следующий) ──
   const nowT=S.flow.now||0, pn=(window.performance?performance.now():Date.now());
