@@ -587,6 +587,20 @@ function renderLadder(){
     }
   }
   S.bestBid=bestBid; S.bestAsk=bestAsk; S.baS=baS; S.bbS=bbS;
+  // ЛИНЕЙКА USDT (зажать L + тянуть): суммарный объём бид+аск в выделенном диапазоне цен
+  if(S._ruler){
+    const _rc=S.contractSize||1, sHi=Math.max(S._ruler.a,S._ruler.b), sLo=Math.min(S._ruler.a,S._ruler.b);
+    let sumUsd=0;
+    for(let s=sLo;s<=sHi;s++){ const i=topS-s; if(i<0||i>=n) continue; const v=(BID[i]||0)+(ASK[i]||0); if(v) sumUsd+=v*_rc*(s*step); }
+    const yHi=Math.round((topS-sHi)*rH), yLo=Math.round((topS-sLo+1)*rH);
+    g.fillStyle="rgba(120,170,255,.12)"; g.fillRect(0,yHi,LW,yLo-yHi);
+    g.strokeStyle="rgba(120,170,255,.6)"; g.lineWidth=1; g.strokeRect(0.5,yHi+0.5,LW-1,Math.max(1,yLo-yHi-1));
+    const lbl="Σ "+(typeof fmt==="function"?fmt(sumUsd):Math.round(sumUsd))+"$";
+    g.font="bold 11px Arial,sans-serif"; g.textAlign="center"; g.textBaseline="middle";
+    const tw=Math.ceil(g.measureText(lbl).width)+10, by=Math.round((yHi+yLo)/2-8);
+    g.fillStyle="rgba(50,80,150,.95)"; g.fillRect(LW/2-tw/2,by,tw,16);
+    g.fillStyle="#dce8ff"; g.fillText(lbl,LW/2,by+8); g.textBaseline="alphabetic"; g.textAlign="left";
+  }
   // ЦЕНТРОВКА ПО КЛАВИШЕ + АВТО-ЦЕНТРОВКА С ГИСТЕРЕЗИСОМ (опция, для волатильности)
   const sc=$("scroller");
   if(sc && S.autoCenter && !S._centerReq && (window.performance?performance.now():Date.now())-(S._userScrollT||0)>2500){

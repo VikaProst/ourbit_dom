@@ -234,11 +234,17 @@ function wireMouse(){
   function lvl(e){ const r=cv.getBoundingClientRect(), rH=(S.geo&&S.geo.rowH)||14;
     const i=Math.floor((e.clientY-r.top)/rH), s=(S.geo?S.geo.topS:0)-i;
     return { s, price:s*S.step, isAsk:s>=S.baS, isBid:s<=S.bbS }; }
-  cv.addEventListener("mousemove",(e)=>{ const p=lvl(e).price; if(p!==S.hover) S.hover=p;
-    S._hoverPri=true; if(window.markDirty) markDirty(); });   // приоритетный кадр — ховер следует за курсором плавно (обходит FPS-троттл)
+  cv.addEventListener("mousemove",(e)=>{ const L=lvl(e); if(L.price!==S.hover) S.hover=L.price;
+    S._hoverPri=true;
+    if(window.rulerHeld && S._ruler){ S._ruler.b=L.s; }   // ЛИНЕЙКА USDT: тянем нижнюю границу
+    if(window.markDirty) markDirty(); });   // приоритетный кадр — ховер следует за курсором плавно (обходит FPS-троттл)
   cv.addEventListener("mouseleave",()=>{ S.hover=null; if(window.markDirty) markDirty(); });
+  // ЛИНЕЙКА USDT: зажать L + тянуть по стакану = замер суммарного объёма в диапазоне
+  cv.addEventListener("mousedown",(e)=>{ if(e.button===0 && window.rulerHeld){ e.preventDefault();
+    S._ruler={a:lvl(e).s, b:lvl(e).s}; if(window.markDirty) markDirty(); } });
   // механика MetaScalp: через спред (в чужую зону) = МАРКЕТ, в свою глубину = ЛИМИТ
   cv.addEventListener("click",(e)=>{
+    if(window.rulerHeld){ return; }   // зажата L (линейка) — не торговать
     if(window.fHeld){ if(T.pos && T.pos.vol>0) closeLimit(lvl(e).price);   // ЗАЖАТА F = «заявка на закрытие» (MetaScalp «Зажать ГК»)
                       else log("нет позиции для заявки на закрытие","err"); return; }
     if(e.ctrlKey){ if(T.pos && T.pos.vol>0) closeLimit(lvl(e).price);   // Ctrl+ЛКМ = то же (альтернатива)
@@ -274,6 +280,7 @@ function wireKeys(){
     if(e.target.tagName==="INPUT"||e.target.tagName==="SELECT") return;
     if(window._bindingKey) return;   // идёт назначение клавиши в настройках — не выполнять действия
     const sc=document.getElementById("scroller"), code=e.code, K=S.keys||{};
+    if(code==="KeyL"){ window.rulerHeld=true; return; }   // ЗАЖАТЬ L = линейка USDT (тянуть по стакану = замер объёма в диапазоне)
     if(code==="KeyF"){ window.fHeld=true; updateCloseMode(); return; }   // ЗАЖАТЬ F = режим «заявка на закрытие»: клик по цене ставит reduce-only лимитку на весь объём позиции
     if(code==="ControlLeft"||code==="ControlRight"){ window.ctrlHeld=true; updateCloseMode(); return; }   // ЗАЖАТЬ Ctrl = тот же режим (индикатор внизу загорается)
     if(e.ctrlKey||e.metaKey||e.altKey) return;   // 🔴 КРИТ: НЕ выполнять торговые клавиши с Ctrl/Alt/Meta (Ctrl+Shift+R=перезагрузка дёргала R=реверс→открывала позу! Ctrl+A/S тоже)
@@ -305,6 +312,7 @@ function wireKeys(){
   document.addEventListener("keyup",(e)=>{ if(e.code==="KeyH") window.hHeld=false;
     if(e.code==="KeyF") window.fHeld=false;
     if(e.code==="ControlLeft"||e.code==="ControlRight") window.ctrlHeld=false;
+    if(e.code==="KeyL"){ window.rulerHeld=false; S._ruler=null; if(window.markDirty) markDirty(); }   // отпустил L — убрать линейку
     updateCloseMode(); });
   window.addEventListener("blur",()=>{ window.fHeld=false; window.ctrlHeld=false; window.hHeld=false; updateCloseMode(); });   // отпустил фокус (alt-tab) — сбросить режимы
 }
