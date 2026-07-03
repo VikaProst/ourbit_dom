@@ -94,7 +94,7 @@ class ObClient:
                               "(KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"}
 
     def _get(self, path, params=None):
-        kw = {"params": params, "headers": self._hdr_get(), "timeout": 8}
+        kw = {"params": params, "headers": self._hdr_get(), "timeout": 15}   # 15с — медленная сеть друга до Ourbit успевает (было 8с → curl(28) таймаут)
         px = _pxy()
         if px:
             kw["proxies"] = px

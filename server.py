@@ -544,11 +544,9 @@ def _activation_ok():
     # СТРОГИЙ режим (1 ключ = 1 IP) через сервер активации
     if _ACT["ok"] and time.time() - _ACT["ts"] < 6 * 3600:
         return True, "ok"                          # успешный кэш 6ч — краткий простой сервера не блокирует
-    key = _act_cfg("license.txt")
-    if not key:
-        return False, "нет ключа активации — впиши его в license.txt (попроси у Вики)"
+    key = _act_cfg("license.txt")   # может быть пусто → сервер всё равно проверит по IP (админ-машины Вики проходят без ключа)
     try:
-        body = json.dumps({"key": key}).encode()
+        body = json.dumps({"key": key or ""}).encode()
         req = urllib.request.Request(srv + "/activate", data=body,
                                      headers={"Content-Type": "application/json", "User-Agent": "term"})
         r = json.loads(urllib.request.urlopen(req, timeout=8).read().decode())
@@ -1506,6 +1504,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, *a):
         pass
+
+    # клиент закрыл соединение (перезагрузка/закрытие вкладки) в момент записи → НЕ шумим трейсбеком (WinError 10053 и т.п.)
+    def handle_one_request(self):
+        try:
+            super().handle_one_request()
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, TimeoutError, OSError):
+            self.close_connection = True
+
+    def finish(self):
+        try:
+            super().finish()
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
+            pass
 
     def _json(self, payload, code=200):
         body = json.dumps(payload).encode("utf-8")

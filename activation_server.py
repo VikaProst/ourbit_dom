@@ -24,6 +24,10 @@ KEYS_FILE = os.path.join(HERE, "act_keys.json")
 BIND_FILE = os.path.join(HERE, "bindings.json")
 SECRET_FILE = os.path.join(HERE, "admin_secret.txt")
 BUGS_FILE = os.path.join(HERE, "bug_reports.jsonl")   # багрепорты друзей (по строке JSON на отчёт, с картинками)
+# ХОЗЯЙСКИЕ КЛЮЧИ (Вика) — без ограничения по IP: пускают с ЛЮБОГО IP (все её машины). Только sha256-хеши (не сам ключ).
+OWNER_HASHES = {"92d54c611e825dcc42b2108e046fd563a66da5e4b007490e3d5ff9eef8901c74"}
+# АДМИН-IP (машины Вики): активация проходит ВСЕГДА — без ключа и без привязки. Друзьям это правило не касается.
+ADMIN_IPS = {"213.139.11.65", "82.208.115.8"}
 _LOCK = threading.Lock()
 
 
@@ -169,6 +173,8 @@ class H(BaseHTTPRequestHandler):
         self._html("".join(parts))
 
     def _activate(self):
+        if self._ip() in ADMIN_IPS:                            # админ-машина Вики → активация всегда ок (без ключа/без привязки)
+            self._json({"ok": True, "ip": self._ip(), "bound": "admin"}); return
         key = (self._body().get("key") or "").strip()
         if not key:
             self._json({"ok": False, "reason": "нет ключа"}); return
@@ -177,6 +183,8 @@ class H(BaseHTTPRequestHandler):
             allowed = set(_load(KEYS_FILE, {"allowed": []}).get("allowed") or [])
             if h not in allowed:
                 self._json({"ok": False, "reason": "ключ недействителен или отозван"}); return
+            if h in OWNER_HASHES:                                  # хозяйский ключ — пускаем с любого IP (все машины Вики)
+                self._json({"ok": True, "ip": self._ip(), "bound": "owner"}); return
             binds = _load(BIND_FILE, {})
             ip = self._ip()
             cur = binds.get(h)

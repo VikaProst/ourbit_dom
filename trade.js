@@ -200,8 +200,10 @@ async function refreshAccount(verbose){
     const r=await fetch("/api/account?symbol="+encodeURIComponent(S.symbol)).then(x=>x.json());
     if(!r.ok){ if(verbose) log("ошибка обновления счёта","err"); return; }
     T.pos=(r.positions&&r.positions[0])||null;
-    if(T._acctInit && (!!T.pos)!==hadPos && window.posSound) posSound(!!T.pos);   // позиция появилась→звук откр / исчезла→звук закр (не на первом refresh)
-    T._acctInit=true;
+    // ЗВУК откр/закр — ТОЛЬКО по подтверждённой сервером смене (не по оптимистичному T.pos, иначе ложные бипы при закрытии/реверсе/мелькании)
+    const _srvHasPos=!!(r.positions && r.positions[0]);
+    if(T._acctInit && _srvHasPos!==T._sndPos && window.posSound) posSound(_srvHasPos);
+    T._sndPos=_srvHasPos; T._acctInit=true;
     let orders=r.orders||[];
     // НЕ воскрешать только что отменённые заявки: биржа отдаёт open_orders с задержкой после отмены → был фликер (пропал→появился→пропал)
     if(T._cancelled && T._cancelled.size){ const now=Date.now();

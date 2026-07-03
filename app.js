@@ -597,7 +597,9 @@ function renderLadder(){
       if(_cur.length || _other.length){                     // зоны рисуем ТОЛЬКО для текущей монеты; позы др.монет — только счётчик в плашке
         let _tVal=0,_tPnl=0; const _cs=S.contractSize||1;
         for(const P of _cur){ if(!(P.avg>0)) continue;
-          const long=P.side===1, avg=P.avg, rtPnl=(mid-avg)*P.vol*_cs*(long?1:-1);
+          const long=P.side===1, avg=P.avg;
+          // PnL берём ГОТОВЫЙ с биржи (P.pnl) — как на Ourbit; клиентский расчёт от mid только если биржа не прислала
+          const rtPnl=(P.pnl!=null && isFinite(P.pnl)) ? P.pnl : (mid-avg)*P.vol*_cs*(long?1:-1);
           _tVal+=P.vol*_cs*mid; _tPnl+=rtPnl;
           const ey=Math.round((topS-avg/step+0.5)*rH), cy=Math.round((topS-mid/step+0.5)*rH);
           const zt=Math.max(0,Math.min(ey,cy)), zb=Math.min(H,Math.max(ey,cy));
@@ -921,7 +923,9 @@ async function pollDepth(){
 async function pollFlow(){
   const cols=Math.max(3, Math.min(40, Math.ceil((Math.max(160,S.fpWidth)-110)/COL_W)+1));
   try{ const r=await fetch("/api/flow?symbol="+encodeURIComponent(S.symbol)+"&fpmin="+cols).then(x=>x.json());
-    if(r.ok){ S.flow=r.flow; renderFootprint(); renderDelta(); }
+    if(r.ok){ const _kt=(S.flow&&S.flow.ticks&&S.flow.ticks.length)?S.flow.ticks:null, _kn=(S.flow&&S.flow.now)||0;
+      S.flow=r.flow; if(_kt){ S.flow.ticks=_kt; if(_kn) S.flow.now=_kn; }   // не затирать тики стрима (30с-кластеры/лента)
+      renderFootprint(); renderDelta(); }
   }catch(e){} }
 
 function wireButtons(){
@@ -1280,7 +1284,11 @@ function connectStream(){
       if(window.tapeFeed) tapeFeed(m.ticks);          // колоночная лента (ring buffer)
       S.flow.ticks=m.ticks; S.flow.now=m.now; S._render=true; renderFlowMeter();
     }   // быстрая лента (пузыри успевают за ценой)
-    else if(m.t==="flow"){ S.flow=m.flow; S._render=true; renderDelta(); renderFlowMeter(); } };
+    else if(m.t==="flow"){                             // серверный снапшот футпринта: берём footprint/delta, но ТИКИ стрима НЕ затираем
+      const _kt=(S.flow&&S.flow.ticks&&S.flow.ticks.length)?S.flow.ticks:null, _kn=(S.flow&&S.flow.now)||0;
+      S.flow=m.flow;
+      if(_kt){ S.flow.ticks=_kt; if(_kn) S.flow.now=_kn; }   // иначе 30с-кластеры мигают (собираются из тиков, а снапшот их подменял)
+      S._render=true; renderDelta(); renderFlowMeter(); } };
   _es.onerror=()=>{ status("err","переподключение…"); };
 }
 // полное обновление стакана по кнопке ↻ (без Ctrl+Shift+R): сброс состояния + переоткрытие потока
