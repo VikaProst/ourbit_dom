@@ -1826,6 +1826,19 @@ class Handler(BaseHTTPRequestHandler):
                     except Exception: pass
                 self._json({"ok": True, "closed": closed, "found": len(poslist),
                             "cancelled_orders": cancelled, "errors": errs})
+            elif route == "/api/weexcreds":           # сохранить ключ WEEX (в weex.txt) + проверить баланс
+                key = (b.get("key") or "").strip(); sec = (b.get("secret") or "").strip(); pas = (b.get("passphrase") or "").strip()
+                if not (key and sec and pas):
+                    self._json({"ok": False, "error": "нужны все 3: key, secret, passphrase"}); return
+                try:
+                    with open(os.path.join(HERE, "weex.txt"), "w", encoding="utf-8") as f:
+                        f.write(key + "\n" + sec + "\n" + pas + "\n")
+                    _WEEX.set_creds(key, sec, pas)
+                    _, bal = _WEEX.balance()                       # тест авторизации
+                    ok = isinstance(bal, list) or (isinstance(bal, dict) and not bal.get("errorCode") and bal.get("code") not in ("-1040", "-1041", "-1042"))
+                    self._json({"ok": True, "tested": bool(ok), "balance": bal})
+                except Exception as exc:
+                    self._json({"ok": False, "error": str(exc)})
             elif route == "/api/weexorder":          # ── ТОРГОВЛЯ WEEX ──
                 if not _WEEX.has_creds():
                     self._json({"ok": False, "error": "нет ключей WEEX (впиши key/secret/passphrase в weex.txt)"}); return

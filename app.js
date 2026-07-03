@@ -1085,6 +1085,23 @@ function wireSettings(){
   const am=$("set-automarketos"); if(am) am.addEventListener("change",()=>{   // «Авто-маркетос» = включить обе авто-настройки разом
     if($("set-fillauto")) $("set-fillauto").checked=am.checked;
     if($("set-colorauto")) $("set-colorauto").checked=am.checked; updateAutoFields(); });
+  // ── строка подключения (сверху): выбор биржи + способ + поля ──
+  const CONN_METHOD={ ourbit:"способ: веб-uid (uc_token)", weex:"просмотр — без входа · торговля — API-ключ" };
+  function applyConnEx(){ const ex=(($("conn-ex")||{}).value)||"ourbit";
+    const m=$("conn-method"); if(m) m.textContent=CONN_METHOD[ex]||"";
+    const fo=$("conn-fields-ourbit"), fw=$("conn-fields-weex");
+    if(fo) fo.style.display = ex==="ourbit" ? "" : "none";
+    if(fw) fw.style.display = ex==="weex" ? "" : "none"; }
+  { const ce=$("conn-ex"); if(ce) ce.addEventListener("change",applyConnEx); applyConnEx();
+    const wb=$("conn-weex-btn"); if(wb) wb.onclick=async()=>{ const st=$("conn-weex-status");
+      const key=(($("conn-weex-key")||{}).value||"").trim(), sec=(($("conn-weex-secret")||{}).value||"").trim(), pas=(($("conn-weex-pass")||{}).value||"").trim();
+      if(!(key&&sec&&pas)){ if(st){st.textContent="заполни key, secret и passphrase"; st.style.color="#ef8f8a";} return; }
+      if(st){ st.textContent="сохраняю и проверяю…"; st.style.color=""; }
+      try{ const r=await fetch("/api/weexcreds",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key,secret:sec,passphrase:pas})}).then(x=>x.json());
+        if(st){ if(r&&r.ok){ st.textContent=r.tested?"✅ ключ сохранён, авторизация работает":"⚠ сохранён, но баланс не проверился (проверь права ключа на фьючерсы)"; st.style.color=r.tested?"#5ecb7f":"#e6a943"; }
+          else { st.textContent="ошибка: "+((r&&r.error)||"нет ответа"); st.style.color="#ef8f8a"; } }
+      }catch(e){ if(st){ st.textContent="сеть недоступна"; st.style.color="#ef8f8a"; } } };
+  }
   wireProxy();
 }
 

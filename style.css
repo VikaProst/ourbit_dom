@@ -61,6 +61,12 @@ label.ac{color:var(--muted);cursor:pointer}
   background:#0d1117;border-bottom:1px solid var(--line)}
 #token{flex:0 0 260px;background:#070a0e;color:var(--text);border:1px solid var(--grid);
   border-radius:5px;padding:4px 8px;font:inherit}
+#conn-ex{background:#0f1420;color:var(--text);border:1px solid var(--grid);
+  border-radius:5px;padding:4px 6px;font:inherit;cursor:pointer;flex:0 0 auto}
+.conn-method{color:var(--muted);font-size:11px;white-space:nowrap;flex:0 0 auto}
+.conn-fields{display:flex;align-items:center;gap:6px}
+#conn-weex-key,#conn-weex-secret,#conn-weex-pass{flex:0 0 120px;background:#070a0e;color:var(--text);
+  border:1px solid var(--grid);border-radius:5px;padding:4px 8px;font:inherit}
 #tradebar button{background:#070a0e;color:var(--text);border:1px solid var(--grid);
   border-radius:5px;padding:4px 10px;font:inherit;cursor:pointer}
 #connectbtn{border-color:var(--big-soft);color:var(--big)}
