@@ -142,6 +142,54 @@ def _depth(symbol: str) -> dict:
             "ts": data.get("timestamp") or int(time.time() * 1000)}
 
 
+# ── СКАНЕР СТЕНОК (маркетос): тянем стакан ТОЛЬКО по топ-кандидатам скринера (не по всем 705), меряем крупнейшую стенку ──
+_WALL_CACHE = {}                        # sym -> (wall_usd, standout_ratio, ts)
+_WALL_WANT = {"syms": [], "ts": 0.0}    # какие символы сканировать (топ скринера) + когда запрошено
+_WALL_LOCK = threading.Lock()
+
+def _csize(sym):
+    data = _instruments()
+    cs = _INSTR.get("csize")
+    if cs is None or _INSTR.get("_csz_ts") != _INSTR["ts"]:
+        cs = {it.get("symbol"): float(it.get("contractSize") or 1) for it in (data or [])}
+        _INSTR["csize"] = cs
+        _INSTR["_csz_ts"] = _INSTR["ts"]
+    return cs.get(sym, 1.0)
+
+def _wall_metric(depth, cs):
+    """Крупнейшая стенка в $ и её «выделенность» (во сколько раз больше средней глубины) по топ-15 уровням каждой стороны."""
+    best_usd = 0.0
+    ratio = 0.0
+    for side in (depth.get("bids") or [], depth.get("asks") or []):
+        lv = side[:15]
+        if not lv:
+            continue
+        usds = [l[0] * l[1] * cs for l in lv]
+        mx = max(usds)
+        avg = sum(usds) / len(usds)
+        if mx > best_usd:
+            best_usd = mx
+        if avg > 0 and mx / avg > ratio:
+            ratio = mx / avg
+    return best_usd, ratio
+
+def _wall_scanner():
+    """Фон: стакан по топ-кандидатам скринера → размер и выделенность стенки в кэш. Активен только пока скринер открыт."""
+    while True:
+        time.sleep(6)
+        with _WALL_LOCK:
+            want = list(_WALL_WANT["syms"])
+            wts = _WALL_WANT["ts"]
+        if not want or time.time() - wts > 25:   # скринер не открыт → не грузим биржу
+            continue
+        for sym in want[:18]:
+            try:
+                usd, ratio = _wall_metric(_depth(sym), _csize(sym))
+                _WALL_CACHE[sym] = (usd, ratio, time.time())
+            except Exception:
+                pass
+
+
 def _fetch_deals(symbol: str) -> list:
     return _get(f"{OURBIT_BASE}/contract/deals/{symbol}", timeout=8).json().get("data") or []
 
@@ -578,7 +626,7 @@ def _screener_top(win_min: float = 1.0, n: int = 40, tfs: dict = None) -> list:
         rows.append({"symbol": sym, "ex": "ourbit", "rise": round(change, 2), "last": last, "bid": bid, "ask": ask,
                      "amt": round(turn), "vol": round(trades), "spread": round(spread, 4), "trades": trades,
                      "dusd": round(delta), "dpct": round(delta / dturn * 100, 2) if dturn else 0.0,
-                     "natr": round(natr, 3), "funding": round(funding * 100, 4),
+                     "natr": round(natr, 3), "funding": round(funding * 100, 4), "amt24": round(amt24),
                      "oipct": round(oi_pct, 2), "oiusd": round(oi_usd), "vspike": round(vspike), "tspike": round(tspike)})
     # Композитная «Активность» — нормировка компонент по набору + взвешенная сумма
     mtr = max((r["trades"] for r in rows), default=1) or 1
@@ -591,11 +639,24 @@ def _screener_top(win_min: float = 1.0, n: int = 40, tfs: dict = None) -> list:
         r["act"] = round(min(100.0, a * 100))
         # СБОР-СКОР (стратегия сбора спреда «ARPA-подобные»): жирный тик × прострелы × свипы, гейт по ликвидности.
         # Идея: низкая цена → 1 тик = жирный % (spread%), активная волатильность (natr) даёт прострелы-филлы, всплеск = свипы через стенки.
-        liq = 0.0 if r["amt"] < 15000 else min(1.0, r["amt"] / 150000.0)   # <$15k оборота = мёртвая, отсекаем; плавно к 1 на $150k
-        spr = min(1.0, r["spread"] / 0.12)     # спред(тик)% 0.12%+ = жирный тик
-        vol = min(1.0, r["natr"] / 2.5)        # NATR 2.5%+ = активные прострелы
+        # гейт ликвидности по 24ч-обороту (всегда есть, в отличие от минутного) — чтоб скор не обнулялся ночью
+        liq = 0.0 if r["amt24"] < 300000 else min(1.0, r["amt24"] / 5000000.0)   # <$300k за сутки = мёртвая; полная ликвидность на $5М+
+        spr = min(1.0, r["spread"] / 0.10)     # спред(тик)% 0.10%+ = жирный тик (как ARPA ~0.08%)
+        vol = min(1.0, r["natr"] / 1.8)        # NATR 1.8%+ = активные прострелы
         vsp = min(1.0, r["vspike"] / 250.0)    # всплеск x2.5 = свипы
-        r["scoll"] = round(min(100.0, (0.50 * spr + 0.32 * vol + 0.18 * vsp) * liq * 100))
+        # МАРКЕТОС (стенки) из фонового сканера стакана по топ-кандидатам
+        wc = _WALL_CACHE.get(r["symbol"])
+        r["wall"] = round(wc[0]) if wc else 0
+        if wc:   # стакан известен → маркетос ГЛАВНЫЙ вес (крупная выделенная стенка = есть от чего собирать спред)
+            wallN = min(1.0, (wc[1] - 1.0) / 4.0) if wc[1] > 1.0 else 0.0   # выделенность x5 глубины = максимум
+            r["scoll"] = round(min(100.0, (0.40 * wallN + 0.30 * spr + 0.18 * vol + 0.12 * vsp) * liq * 100))
+        else:    # стакан ещё не сканирован → по тикеру (спред-первичный), не штрафуем
+            r["scoll"] = round(min(100.0, (0.50 * spr + 0.32 * vol + 0.18 * vsp) * liq * 100))
+    # топ-кандидатов отправляем сканеру стенок (следующий проход учтёт маркетос)
+    _top = sorted(rows, key=lambda r: r["scoll"], reverse=True)[:18]
+    with _WALL_LOCK:
+        _WALL_WANT["syms"] = [r["symbol"] for r in _top]
+        _WALL_WANT["ts"] = time.time()
     rows.sort(key=lambda r: (r["amt"], r["trades"]), reverse=True)
     return rows[:n]
 
@@ -1646,6 +1707,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     threading.Thread(target=_poller, daemon=True).start()
     threading.Thread(target=_screener_poller, daemon=True, name="screener").start()
+    threading.Thread(target=_wall_scanner, daemon=True, name="wall-scanner").start()
     for _ex in _EX_ADAPTERS:
         threading.Thread(target=_ex_poll, args=(_ex,), daemon=True, name="scr-" + _ex).start()
     threading.Thread(target=_membership_sweep, daemon=True, name="ex-membership").start()

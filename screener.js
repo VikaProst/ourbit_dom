@@ -15,6 +15,7 @@
     {k:"amt",    t:"Оборот $",  kind:"usd"},
     {k:"act",    t:"Активность",kind:"act"},
     {k:"scoll",  t:"СБОР",      kind:"scol"},
+    {k:"wall",   t:"СТЕНА $",   kind:"usd"},
     {k:"spread", t:"Спред %",   kind:"spr"},
     {k:"natr",   t:"NATR %",    kind:"num3"},
     {k:"dpct",   t:"Δоб %",     kind:"signpct"},
@@ -27,7 +28,7 @@
     {k:"vol",    t:"Объём",     kind:"num"},
     {k:"last",   t:"Цена",      kind:"price"},
   ];
-  const DEF = { cols:["coin","scoll","rise","amt","act","spread","natr"], sort:"scoll", dir:-1, topN:20,
+  const DEF = { cols:["coin","scoll","wall","rise","amt","spread","natr"], sort:"scoll", dir:-1, topN:20,
                 freeze:true, sound:false, mute:30, filters:{}, exchanges:["ourbit"], exExcluded:[], tfs:{}, colW:{}, showStrip:true };
   const TF_METRICS = new Set(["rise","trades","amt","natr","vspike","tspike","dusd","dpct","oipct","oiusd"]);  // метрики с таймфреймом
   const TF_OPTS = [1,3,5,15,30,60];
@@ -129,7 +130,7 @@
       av=a[k]||0; bv=b[k]||0; return dir*(av-bv); });
   }
 
-  const DEFW = {coin:210,rise:78,trades:70,amt:92,act:80,scoll:92,spread:70,natr:70,dpct:74,dusd:84,vspike:82,tspike:86,funding:74,oipct:70,oiusd:84,vol:70,last:80};
+  const DEFW = {coin:210,rise:78,trades:70,amt:92,act:80,scoll:92,wall:88,spread:70,natr:70,dpct:74,dusd:84,vspike:82,tspike:86,funding:74,oipct:70,oiusd:84,vol:70,last:80};
   function colW(k){ return (CFG.colW&&CFG.colW[k])||DEFW[k]||80; }
   function applyCols(){                                  // ширины колонок через <colgroup> (table-layout:fixed)
     const cg=g("scrcolgroup"); if(!cg) return; let h="";
