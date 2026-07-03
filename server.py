@@ -348,7 +348,7 @@ def _trade_connect(token: str) -> dict:
     if avail == 0.0 and equity == 0.0:
         # часто = истёкший токен (assets вернул 401/пусто)
         _TRADE.update({"connected": False, "armed": False})
-        return {"ok": False, "error": "баланс 0 / токен истёк — пришли свежий uc_token"}
+        return {"ok": False, "error": "баланс 0 — либо НЕТ USDT на ФЬЮЧЕРСАХ (переведи со спота), либо токен истёк (пришли свежий uc_token)"}
     try:
         fee = _OB.fee_check()
     except Exception:
