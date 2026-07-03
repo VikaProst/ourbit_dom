@@ -16,3 +16,5 @@ keys_log.txt
 # НЕ игнорируем manifest.json и update_url.txt — они нужны для авто-обновления
 order_log.txt
 weex.txt
+bug_reports.jsonl
+bug_reports_local.jsonl

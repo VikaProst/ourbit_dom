@@ -18,7 +18,7 @@
     border-radius:12px;box-shadow:0 10px 32px rgba(0,0,0,.55);z-index:99999;display:none;overflow:hidden;
     font-family:Arial,Helvetica,sans-serif;color:#dfe5ee}
   #bugpanel.on{display:block}
-  #bughead{background:#20favc;background:linear-gradient(90deg,#233152,#1b2130);padding:10px 12px;font-weight:700;
+  #bughead{background:linear-gradient(90deg,#233152,#1b2130);padding:10px 12px;font-weight:700;
     font-size:14px;display:flex;justify-content:space-between;align-items:center}
   #bughead .x{cursor:pointer;opacity:.7;font-size:16px}
   #bughead .x:hover{opacity:1}

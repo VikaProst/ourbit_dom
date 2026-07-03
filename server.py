@@ -1497,6 +1497,7 @@ _STATIC = {"/app.js": "application/javascript; charset=utf-8",
            "/dock.js": "application/javascript; charset=utf-8",
            "/theme.js": "application/javascript; charset=utf-8",
            "/tile.js": "application/javascript; charset=utf-8",
+           "/bugreport.js": "application/javascript; charset=utf-8",
            "/style.css": "text/css; charset=utf-8"}
 
 
@@ -1974,6 +1975,43 @@ class Handler(BaseHTTPRequestHandler):
             elif route == "/api/autostop":          # тумблер: ставить ли биржевой SL/TP автоматически
                 _TRADE["auto_stop"] = bool(b.get("on"))
                 self._json({"ok": True, "auto_stop": _TRADE["auto_stop"]})
+            elif route == "/api/bug":                # багрепорт из виджета → пересылаем на центральный сервер Вики
+                text = (b.get("text") or "").strip()
+                imgs = b.get("images") or []
+                if not isinstance(imgs, list): imgs = []
+                imgs = [i for i in imgs if isinstance(i, str) and i.startswith("data:image")][:4]
+                if not text and not imgs:
+                    self._json({"ok": False, "error": "пустой отчёт"}); return
+                who = ""                             # короткий id отправителя (Вика видит КТО прислал; сам ключ не раскрываем)
+                try:
+                    _k = _act_cfg("license.txt")
+                    if _k:
+                        import hashlib as _h
+                        who = _h.sha256(_k.encode()).hexdigest()[:8]
+                except Exception:
+                    pass
+                report = {"text": text[:4000], "images": imgs,
+                          "symbol": (b.get("symbol") or "")[:40], "version": (b.get("version") or "")[:20],
+                          "ua": (b.get("ua") or "")[:300], "who": who,
+                          "ts": time.strftime("%Y-%m-%d %H:%M:%S")}
+                try:                                 # локальный бэкап на машине друга (без картинок — только след, чтобы факт не потерять)
+                    with open(os.path.join(HERE, "bug_reports_local.jsonl"), "a", encoding="utf-8") as _bf:
+                        _meta = {k: report[k] for k in ("text", "symbol", "version", "who", "ts")}
+                        _meta["images"] = len(imgs)
+                        _bf.write(json.dumps(_meta, ensure_ascii=False) + "\n")
+                except Exception:
+                    pass
+                srv = _act_cfg("license_server.txt").rstrip("/")
+                if not srv:
+                    self._json({"ok": True, "local": True}); return
+                try:
+                    _rb = json.dumps(report).encode()
+                    _rq = urllib.request.Request(srv + "/bug", data=_rb,
+                                                 headers={"Content-Type": "application/json", "User-Agent": "term"})
+                    _rr = json.loads(urllib.request.urlopen(_rq, timeout=15).read().decode())
+                    self._json({"ok": bool(_rr.get("ok")), "resp": _rr})
+                except Exception as exc:
+                    self._json({"ok": False, "error": "сервер багов недоступен: " + str(exc)})
             elif route.startswith("/api/proxy/"):
                 if not _proxy:
                     self._json({"ok": False, "error": "модуль proxy не загружен"}); return

@@ -23,6 +23,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 KEYS_FILE = os.path.join(HERE, "act_keys.json")
 BIND_FILE = os.path.join(HERE, "bindings.json")
 SECRET_FILE = os.path.join(HERE, "admin_secret.txt")
+BUGS_FILE = os.path.join(HERE, "bug_reports.jsonl")   # багрепорты друзей (по строке JSON на отчёт, с картинками)
 _LOCK = threading.Lock()
 
 
@@ -62,10 +63,31 @@ class H(BaseHTTPRequestHandler):
 
     def _body(self):
         n = int(self.headers.get("Content-Length") or 0)
+        if n > 12_000_000:      # защита от гигантских POST (баги с фото сжаты, 4 картинки ≈ 1-2 МБ)
+            try: self.rfile.read(n)
+            except Exception: pass
+            return {}
         try:
             return json.loads(self.rfile.read(n).decode() or "{}")
         except Exception:
             return {}
+
+    def _html(self, body, code=200):
+        page = ("<!doctype html><meta charset=utf-8><title>Баги SQUAD TERMINAL</title>"
+                "<style>body{background:#0d1117;color:#dfe5ee;font:14px Arial,Helvetica,sans-serif;margin:0;padding:18px}"
+                "h1{font-size:19px;margin:0 0 16px}"
+                ".b{background:#161b22;border:1px solid #2c3444;border-radius:10px;padding:12px 14px;margin:0 0 14px;max-width:840px}"
+                ".m{color:#8994a6;font-size:12px;margin-bottom:6px}"
+                ".t{white-space:pre-wrap;font-size:14px;line-height:1.5}"
+                ".imgs{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}"
+                ".imgs img{max-width:250px;max-height:200px;border-radius:8px;border:1px solid #2c3444;cursor:zoom-in}"
+                ".empty{color:#8994a6}</style>") + body
+        data = page.encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def _ip(self):
         xff = self.headers.get("X-Forwarded-For")
@@ -75,6 +97,8 @@ class H(BaseHTTPRequestHandler):
         if self.path.startswith("/health"):
             allowed = _load(KEYS_FILE, {"allowed": []}).get("allowed") or []
             self._json({"ok": True, "keys": len(allowed), "bound": len(_load(BIND_FILE, {}))})
+        elif self.path.startswith("/bugs"):
+            self._bugs_view()
         else:
             self._json({"ok": False}, 404)
 
@@ -83,8 +107,66 @@ class H(BaseHTTPRequestHandler):
             self._activate()
         elif self.path.startswith("/admin"):
             self._admin()
+        elif self.path.startswith("/bug"):
+            self._bug()
         else:
             self._json({"ok": False}, 404)
+
+    def _bug(self):
+        b = self._body()
+        text = (b.get("text") or "").strip()
+        imgs = b.get("images") or []
+        if not isinstance(imgs, list):
+            imgs = []
+        imgs = [i for i in imgs if isinstance(i, str) and i.startswith("data:image")][:4]
+        if not text and not imgs:
+            self._json({"ok": False, "reason": "пустой отчёт"}); return
+        rec = {"text": text[:4000], "images": imgs,
+               "symbol": (b.get("symbol") or "")[:40], "version": (b.get("version") or "")[:20],
+               "ua": (b.get("ua") or "")[:300], "who": (b.get("who") or "")[:16],
+               "ip": self._ip(), "ts": (b.get("ts") or "")[:32]}
+        with _LOCK:
+            try:
+                with open(BUGS_FILE, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            except Exception as e:
+                self._json({"ok": False, "reason": str(e)}); return
+        self._json({"ok": True})
+
+    def _bugs_view(self):
+        import html as _h
+        from urllib.parse import urlparse, parse_qs
+        sec = (parse_qs(urlparse(self.path).query).get("secret") or [""])[0]
+        if not _secret() or sec != _secret():
+            self._html("<h1>🔒 Доступ закрыт</h1><p class=empty>Добавь к адресу <b>?secret=ТВОЙ_АДМИН_СЕКРЕТ</b> "
+                       "(тот же, что в admin_secret.txt).</p>", 403); return
+        recs = []
+        try:
+            for line in open(BUGS_FILE, encoding="utf-8"):
+                line = line.strip()
+                if line:
+                    try: recs.append(json.loads(line))
+                    except Exception: pass
+        except Exception:
+            pass
+        recs = recs[-500:][::-1]        # последние 500, новые сверху
+        parts = ["<h1>🐞 Баги от друзей — {} шт.</h1>".format(len(recs))]
+        if not recs:
+            parts.append("<p class=empty>Пока пусто — багрепортов не приходило.</p>")
+        for r in recs:
+            meta = " · ".join(x for x in [
+                r.get("ts", ""),
+                ("от " + r.get("who", "")) if r.get("who") else "",
+                r.get("symbol", ""),
+                ("v" + r.get("version", "")) if r.get("version") else "",
+                ("ip " + r.get("ip", "")) if r.get("ip") else "",
+            ] if x)
+            imgs = "".join('<img src="{}" onclick="window.open(this.src)">'.format(i)
+                           for i in (r.get("images") or []))
+            parts.append('<div class="b"><div class="m">{}</div><div class="t">{}</div>{}</div>'.format(
+                _h.escape(meta), _h.escape(r.get("text", "") or "(без текста)"),
+                ('<div class="imgs">' + imgs + '</div>') if imgs else ""))
+        self._html("".join(parts))
 
     def _activate(self):
         key = (self._body().get("key") or "").strip()
