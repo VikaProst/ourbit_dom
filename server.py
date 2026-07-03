@@ -173,21 +173,31 @@ def _wall_metric(depth, cs):
             ratio = mx / avg
     return best_usd, ratio
 
+try:
+    _WALL_SESS = _http.Session(impersonate="chrome120")   # ОТДЕЛЬНАЯ сессия сканера — не конкурирует с фидами скринера/стакана
+except Exception:
+    _WALL_SESS = _http.Session()
+def _wall_depth(symbol):
+    data = _WALL_SESS.get(f"{OURBIT_BASE}/contract/depth/{symbol}", timeout=8).json().get("data") or {}
+    b, a = _clean_book(data.get("bids") or [], data.get("asks") or [])
+    return {"symbol": symbol, "bids": b, "asks": a}
 def _wall_scanner():
-    """Фон: стакан по топ-кандидатам скринера → размер и выделенность стенки в кэш. Активен только пока скринер открыт."""
+    """Фон: стакан по топ-кандидатам скринера → размер/выделенность стенки в кэш. Активен только пока скринер открыт.
+    Отдельная сессия + мягкая нагрузка (12 монет, каждые 8с, микропауза), чтобы НЕ лагал скринер."""
     while True:
-        time.sleep(6)
+        time.sleep(8)
         with _WALL_LOCK:
             want = list(_WALL_WANT["syms"])
             wts = _WALL_WANT["ts"]
         if not want or time.time() - wts > 25:   # скринер не открыт → не грузим биржу
             continue
-        for sym in want[:18]:
+        for sym in want[:12]:
             try:
-                usd, ratio = _wall_metric(_depth(sym), _csize(sym))
+                usd, ratio = _wall_metric(_wall_depth(sym), _csize(sym))
                 _WALL_CACHE[sym] = (usd, ratio, time.time())
             except Exception:
                 pass
+            time.sleep(0.15)                     # микропауза — не забиваем сеть залпом
 
 
 def _fetch_deals(symbol: str) -> list:
@@ -288,6 +298,170 @@ def _want(sym):
 # ─── торговля (Этап 2): лёгкий подписанный клиент + защита ───
 from ob_client import ObClient, TYPE_MARKET
 _OB = ObClient()
+
+# ── WEEX (2-й источник стакана; торговля позже через веб-uid) ──
+from weex_client import _WEEX, to_v3 as _wx_v3
+_WEEX_INFO = {"ts": 0.0, "map": {}}
+def _weex_tick(sym):
+    now = time.time()
+    if now - _WEEX_INFO["ts"] > 600:
+        try:
+            info = _WEEX.exchange_info() or {}
+            m = {}
+            for s in (info.get("symbols") or []):
+                pp = s.get("pricePrecision")
+                if pp is not None:
+                    m[s.get("symbol")] = 10 ** (-int(pp))
+            if m:
+                _WEEX_INFO["map"] = m
+                _WEEX_INFO["ts"] = now
+        except Exception:
+            pass
+    return _WEEX_INFO["map"].get(_wx_v3(sym), 0.0001)
+
+def _load_weex_creds():
+    """Ключи WEEX из weex.txt (3 строки: key / secret / passphrase). Наружу не уходит (в .gitignore)."""
+    try:
+        with open(os.path.join(HERE, "weex.txt"), encoding="utf-8") as f:
+            lines = [l.strip() for l in f if l.strip() and not l.strip().startswith("#")]
+        if len(lines) >= 3:
+            _WEEX.set_creds(lines[0], lines[1], lines[2])
+            return True
+    except Exception:
+        pass
+    return False
+_load_weex_creds()
+
+_WEEX_SYMS = {"ts": 0.0, "list": []}
+def _weex_syms():
+    now = time.time()
+    if now - _WEEX_SYMS["ts"] > 600:
+        try:
+            info = _WEEX.exchange_info() or {}
+            bases = []
+            for s in (info.get("symbols") or []):
+                sym = s.get("symbol", "")     # BTCUSDT
+                if sym.endswith("USDT"):
+                    bases.append(sym[:-4])
+            if bases:
+                _WEEX_SYMS["list"] = bases
+                _WEEX_SYMS["ts"] = now
+        except Exception:
+            pass
+    return _WEEX_SYMS["list"]
+
+# ── СКАНЕР WEEX (для колонок «Сделки» и «СБОР/маркетос» скринера) — лёгкий: топ-12 монет, отдельная сессия ──
+_WEEX_TR = {}                              # sym -> (count, ts)  число сделок
+_WEEX_WALL = {}                            # sym -> (wall_usd, ratio, ts)  маркетос-стена
+_WEEX_TR_WANT = {"syms": [], "ts": 0.0}
+_WEEX_TR_LOCK = threading.Lock()
+try:
+    _WTR_SESS = _http.Session(impersonate="chrome120")
+except Exception:
+    _WTR_SESS = _http.Session()
+def _weex_trade_count(symbol, win_sec=60):
+    """Сделок за окно. Лента WEEX отдаёт ~100 последних → у активных все в окне (потолок 100).
+    Поэтому берём СКОРОСТЬ (сделок/сек по размаху) и экстраполируем на окно — активные различаются."""
+    from weex_client import to_v2 as _wv2
+    r = _WTR_SESS.get(f"https://api-contract.weex.com/capi/v2/market/trades?symbol={_wv2(symbol)}", timeout=8).json()
+    trades = r if isinstance(r, list) else []
+    times = sorted(t for t in (float(x.get("time") or 0) for x in trades) if t > 0)
+    if len(times) < 2:
+        return len(trades)
+    span_ms = times[-1] - times[0]
+    if span_ms <= 0:
+        return len(times)
+    rate = len(times) / (span_ms / 1000.0)      # сделок/сек
+    return int(round(rate * win_sec))            # экстраполяция на окно (мин) — реальная скорость, не потолок 100
+def _weex_trades_scanner():
+    """Фон: число сделок WEEX по топ-монетам скринера в кэш. Активен только пока скринер с WEEX открыт."""
+    while True:
+        time.sleep(8)
+        with _WEEX_TR_LOCK:
+            want = list(_WEEX_TR_WANT["syms"])
+            wts = _WEEX_TR_WANT["ts"]
+        if not want or time.time() - wts > 25:
+            continue
+        for sym in want[:12]:
+            try:
+                _WEEX_TR[sym] = (_weex_trade_count(sym), time.time())
+            except Exception:
+                pass
+            try:
+                _usd, _ratio = _wall_metric(_WEEX.depth(sym), 1.0)   # стена WEEX (size в монетах → cs=1)
+                _WEEX_WALL[sym] = (_usd, _ratio, time.time())
+            except Exception:
+                pass
+            time.sleep(0.15)
+
+# ── WEEX WebSocket: real-time стакан (снимок+дельты) и лента для АКТИВНОГО символа ──
+_WEEX_WS = {"want": None, "sym": None, "bids": {}, "asks": {}, "trades": collections.deque(maxlen=400), "ts": 0.0}
+_WEEX_WS_LOCK = threading.Lock()
+def _weex_ws_book():
+    with _WEEX_WS_LOCK:
+        bids = sorted(_WEEX_WS["bids"].items(), key=lambda x: -x[0])[:20]
+        asks = sorted(_WEEX_WS["asks"].items(), key=lambda x: x[0])[:20]
+        return {"bids": [[p, v] for p, v in bids], "asks": [[p, v] for p, v in asks]}, _WEEX_WS["sym"], _WEEX_WS["ts"]
+def _weex_ws_runner():
+    import asyncio
+    import json as J
+    try:
+        import websockets
+    except ImportError:
+        return
+    async def run():
+        while True:
+            cur = None
+            try:
+                async with websockets.connect("wss://ws-contract.weex.com/v3/ws/public", open_timeout=8, ping_interval=None) as ws:
+                    while True:
+                        want = _WEEX_WS["want"]
+                        if want != cur:
+                            if cur:
+                                try: await ws.send(J.dumps({"method": "UNSUBSCRIBE", "params": [_wx_v3(cur) + "@depth15", _wx_v3(cur) + "@trade"], "id": 9}))
+                                except Exception: pass
+                            with _WEEX_WS_LOCK:
+                                _WEEX_WS["bids"] = {}; _WEEX_WS["asks"] = {}; _WEEX_WS["trades"].clear(); _WEEX_WS["sym"] = want; _WEEX_WS["ts"] = 0.0
+                            if want:
+                                await ws.send(J.dumps({"method": "SUBSCRIBE", "params": [_wx_v3(want) + "@depth15", _wx_v3(want) + "@trade"], "id": 1}))
+                            cur = want
+                        try:
+                            m = await asyncio.wait_for(ws.recv(), timeout=2)
+                        except asyncio.TimeoutError:
+                            try: await ws.send(J.dumps({"method": "PONG", "id": 1}))
+                            except Exception: pass
+                            continue
+                        try: d = J.loads(m)
+                        except Exception: continue
+                        ev = str(d.get("e") or "").lower()
+                        if d.get("event") in ("ping", "pong") or d.get("type") == "ping":
+                            try: await ws.send(J.dumps({"method": "PONG", "id": 1}))
+                            except Exception: pass
+                            continue
+                        if "depth" in ev:
+                            snap = str(d.get("d")).upper() == "SNAPSHOT" or ev == "depthsnapshot"
+                            with _WEEX_WS_LOCK:
+                                if snap:
+                                    _WEEX_WS["bids"] = {}; _WEEX_WS["asks"] = {}
+                                for side, book in (("b", "bids"), ("a", "asks")):
+                                    for lvl in (d.get(side) or []):
+                                        try: p = float(lvl[0]); v = float(lvl[1])
+                                        except Exception: continue
+                                        if v <= 0: _WEEX_WS[book].pop(p, None)
+                                        else: _WEEX_WS[book][p] = v
+                                _WEEX_WS["ts"] = time.time()
+                        elif "trade" in ev:
+                            with _WEEX_WS_LOCK:
+                                for t in (d.get("d") or []):
+                                    try:
+                                        side = 2 if str(t.get("m")).lower() == "true" else 1
+                                        _WEEX_WS["trades"].append({"id": t.get("t"), "t": int(t.get("T") or 0), "p": float(t.get("p") or 0), "v": float(t.get("q") or 0), "side": side})
+                                    except Exception: pass
+            except Exception:
+                await asyncio.sleep(2)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(run())
 _TRADE = {"connected": False, "armed": False, "zero_fee": False,
           "balance": 0.0, "equity": 0.0, "fee": None, "auto_stop": False}   # биржевые SL/TP ВЫКЛ по умолчанию (план-ордера накапливались и переоткрывали позы). Стоп — application-side в терминале
 _MAX_VOL = 500000        # аварийный верхний предел контрактов на 1 ордер (защита от NaN/аномалии)
@@ -1054,15 +1228,36 @@ def _screener_top_ex(ex: str, win: float = 30.0, n: int = 40) -> list:
                 prev_dvol = max(0.0, o[1] - pe[1])
                 if prev_dvol > 0:
                     vspike = round(d_vol / prev_dvol * 100)
+        _scoll = 0; _wall = 0
+        if ex == "weex":                     # СБОР/маркетос для WEEX (спред×прострелы×свипы×стена, гейт по 24ч)
+            _liq = 0.0 if amt24 < 300000 else min(1.0, amt24 / 5000000.0)
+            _spr = min(1.0, spread / 0.10); _vol = min(1.0, natr / 1.8); _vsp = min(1.0, vspike / 250.0)
+            _wc = _WEEX_WALL.get(sym)
+            if _wc:
+                _wall = round(_wc[0])
+                _wallN = min(1.0, (_wc[1] - 1.0) / 4.0) if _wc[1] > 1.0 else 0.0
+                _scoll = round(min(100.0, (0.40 * _wallN + 0.30 * _spr + 0.18 * _vol + 0.12 * _vsp) * _liq * 100))
+            else:
+                _scoll = round(min(100.0, (0.50 * _spr + 0.32 * _vol + 0.18 * _vsp) * _liq * 100))
         rows.append({"symbol": sym, "ex": ex, "rise": round(rise * 100, 2), "last": last, "bid": bid, "ask": ask,
                      "amt": round(d_amt), "vol": round(d_vol), "spread": spread, "trades": 0,
-                     "dusd": 0, "dpct": 0.0, "natr": natr, "funding": 0.0,
+                     "dusd": 0, "dpct": 0.0, "natr": natr, "funding": 0.0, "scoll": _scoll, "wall": _wall,
                      "oipct": 0.0, "oiusd": 0, "vspike": vspike})
     mam = max((r["amt"] for r in rows), default=1) or 1
     for r in rows:
         r["act"] = round(100 * r["amt"] / mam)
     rows.sort(key=lambda r: r["amt"], reverse=True)
-    return rows[:n]
+    top = rows[:n]
+    if ex == "weex":                     # реальное число сделок WEEX из фонового сканера (топ-монеты)
+        for r in top:
+            tc = _WEEX_TR.get(r["symbol"])
+            if tc:
+                r["trades"] = tc[0]
+                r["vol"] = tc[0]
+        with _WEEX_TR_LOCK:
+            _WEEX_TR_WANT["syms"] = [r["symbol"] for r in top[:12]]
+            _WEEX_TR_WANT["ts"] = time.time()
+    return top
 
 
 
@@ -1391,6 +1586,47 @@ class Handler(BaseHTTPRequestHandler):
                 live = _depth_live(sym)
                 self._json({"ok": True, "depth": live or _depth(sym),
                             "tick": _tick_of(sym), "src": "ws" if live else "rest"})
+            elif route == "/api/weexdepth":          # стакан WEEX (WS real-time, фолбэк REST)
+                sym = (qs.get("symbol") or ["BTC_USDT"])[0]
+                _WEEX_WS["want"] = sym                # сказать WS подписаться на этот символ
+                book, wsym, wts = _weex_ws_book()
+                if wsym == sym and book["bids"] and book["asks"] and (time.time() - wts) < 4:
+                    self._json({"ok": True, "depth": {"symbol": sym, "bids": book["bids"], "asks": book["asks"], "ts": int(wts * 1000)},
+                                "tick": _weex_tick(sym), "src": "ws"})
+                else:
+                    try:
+                        self._json({"ok": True, "depth": _WEEX.depth(sym), "tick": _weex_tick(sym), "src": "rest"})
+                    except Exception as exc:
+                        self._json({"ok": False, "error": str(exc)})
+            elif route == "/api/weexsyms":            # список монет WEEX (для ярлыков в поиске)
+                self._json({"ok": True, "syms": _weex_syms()})
+            elif route == "/api/weexaccount":         # позиции + баланс WEEX (для Финрез/маркеров)
+                if not _WEEX.has_creds():
+                    self._json({"ok": False, "error": "нет ключей WEEX"}); return
+                try:
+                    _, pos = _WEEX.positions()
+                    _, bal = _WEEX.balance()
+                    self._json({"ok": True, "positions": pos, "balance": bal})
+                except Exception as exc:
+                    self._json({"ok": False, "error": str(exc)})
+            elif route == "/api/weextrades":          # лента сделок WEEX (WS real-time, фолбэк REST)
+                sym = (qs.get("symbol") or ["BTC_USDT"])[0]
+                _WEEX_WS["want"] = sym
+                with _WEEX_WS_LOCK:
+                    live = list(_WEEX_WS["trades"]) if _WEEX_WS["sym"] == sym else []
+                if live:
+                    self._json({"ok": True, "ticks": live, "src": "ws"}); return
+                try:
+                    raw = _WEEX.trades(sym) or []
+                    out = []
+                    for t in (raw if isinstance(raw, list) else []):
+                        # isBuyerMaker=true → покупатель мейкер → АГРЕССОР продавец → sell(2); иначе buy(1)
+                        side = 2 if str(t.get("isBuyerMaker")).lower() == "true" else 1
+                        out.append({"id": t.get("ticketId"), "t": int(t.get("time") or 0),
+                                    "p": float(t.get("price") or 0), "v": float(t.get("size") or 0), "side": side})
+                    self._json({"ok": True, "ticks": out})
+                except Exception as exc:
+                    self._json({"ok": False, "error": str(exc)})
             elif route == "/api/flow":
                 sym = (qs.get("symbol") or ["XAUT_USDT"])[0]
                 _ACTIVE["symbol"] = sym; _want(sym)
@@ -1590,6 +1826,52 @@ class Handler(BaseHTTPRequestHandler):
                     except Exception: pass
                 self._json({"ok": True, "closed": closed, "found": len(poslist),
                             "cancelled_orders": cancelled, "errors": errs})
+            elif route == "/api/weexorder":          # ── ТОРГОВЛЯ WEEX ──
+                if not _WEEX.has_creds():
+                    self._json({"ok": False, "error": "нет ключей WEEX (впиши key/secret/passphrase в weex.txt)"}); return
+                try:
+                    _t0 = time.time()
+                    sc, resp = _WEEX.create_order(b.get("symbol", "BTC_USDT"), b.get("side", "BUY"),
+                                                  b.get("positionSide", "BOTH"), b.get("otype", "MARKET"),
+                                                  b.get("qty"), b.get("price"), b.get("tif", "GTC"))
+                    ok = bool((isinstance(resp, dict) and (resp.get("success") or resp.get("orderId") or (resp.get("data") or {}).get("orderId"))) or sc == 200)
+                    self._json({"ok": ok, "http": sc, "resp": resp, "srv_ms": round((time.time() - _t0) * 1000)})
+                except Exception as exc:
+                    self._json({"ok": False, "error": str(exc)})
+            elif route == "/api/weexclose":
+                if not _WEEX.has_creds():
+                    self._json({"ok": False, "error": "нет ключей WEEX"}); return
+                try:
+                    _t0 = time.time()
+                    sc, resp = _WEEX.close_position(b.get("symbol", "BTC_USDT"), b.get("positionSide", "BOTH"))
+                    self._json({"ok": bool((isinstance(resp, dict) and resp.get("success")) or sc == 200), "resp": resp, "srv_ms": round((time.time() - _t0) * 1000)})
+                except Exception as exc:
+                    self._json({"ok": False, "error": str(exc)})
+            elif route == "/api/weexcancel":
+                if not _WEEX.has_creds():
+                    self._json({"ok": False, "error": "нет ключей WEEX"}); return
+                try:
+                    sc, resp = _WEEX.cancel(b.get("symbol", "BTC_USDT"), b.get("orderId"))
+                    self._json({"ok": bool((isinstance(resp, dict) and resp.get("success")) or sc == 200), "resp": resp})
+                except Exception as exc:
+                    self._json({"ok": False, "error": str(exc)})
+            elif route == "/api/weexcancelall":
+                if not _WEEX.has_creds():
+                    self._json({"ok": False, "error": "нет ключей WEEX"}); return
+                try:
+                    sc, resp = _WEEX.cancel_all(b.get("symbol", "BTC_USDT"))
+                    self._json({"ok": bool((isinstance(resp, dict) and resp.get("success")) or sc == 200), "resp": resp})
+                except Exception as exc:
+                    self._json({"ok": False, "error": str(exc)})
+            elif route == "/api/weexleverage":
+                if not _WEEX.has_creds():
+                    self._json({"ok": False, "error": "нет ключей WEEX"}); return
+                try:
+                    mt = "ISOLATED" if b.get("margin") == "isolated" else "CROSSED"
+                    sc, resp = _WEEX.set_leverage(b.get("symbol", "BTC_USDT"), mt, int(b.get("leverage", 20)))
+                    self._json({"ok": bool((isinstance(resp, dict) and resp.get("success")) or sc == 200), "resp": resp})
+                except Exception as exc:
+                    self._json({"ok": False, "error": str(exc)})
             elif route == "/api/order":
                 if not _TRADE["armed"]:
                     self._json({"ok": False, "error": "LIVE не включён"}); return
@@ -1708,6 +1990,8 @@ def main():
     threading.Thread(target=_poller, daemon=True).start()
     threading.Thread(target=_screener_poller, daemon=True, name="screener").start()
     threading.Thread(target=_wall_scanner, daemon=True, name="wall-scanner").start()
+    threading.Thread(target=_weex_trades_scanner, daemon=True, name="weex-trades").start()
+    threading.Thread(target=_weex_ws_runner, daemon=True, name="weex-ws").start()
     for _ex in _EX_ADAPTERS:
         threading.Thread(target=_ex_poll, args=(_ex,), daemon=True, name="scr-" + _ex).start()
     threading.Thread(target=_membership_sweep, daemon=True, name="ex-membership").start()

@@ -164,8 +164,13 @@ function openSymbolSearch(onPick, anchorEl){
   const render=(flt)=>{ list.innerHTML=""; const q=(flt||"").toUpperCase(); let n=0;
     for(const sym of all){ const base=sym.replace("_USDT","");
       if(q && base.indexOf(q)<0) continue; if(n++>300) break;
-      const it=document.createElement("div"); it.className="symsearch-it"+(sym===S.symbol?" on":""); it.textContent=base;
-      it.onclick=()=>{ if(onPick) onPick(sym); else switchSymbol(sym); const si=$("symbol"); if(si) si.value=base; closeSymbolSearch(); };
+      const it=document.createElement("div"); it.className="symsearch-it"+(sym===S.symbol?" on":"");
+      const onW = S._weexSet && S._weexSet.has(base);
+      it.style.display="flex"; it.style.alignItems="center"; it.style.justifyContent="space-between";
+      it.innerHTML='<span>'+base+'</span><span style="display:flex;align-items:center">'+ssExBadge("ourbit")+(onW?ssExBadge("weex"):"")+'</span>';
+      it.onclick=(e)=>{ const badge=(e.target.closest&&e.target.closest(".ss-ex")); const ex=badge?badge.dataset.ex:"ourbit";
+        if(onPick) onPick(sym); else switchSymbol(sym); const si=$("symbol"); if(si) si.value=base;
+        setWeexMode(ex==="weex"); closeSymbolSearch(); };
       list.appendChild(it); } };
   render("");
   inp.oninput=()=>render(inp.value.trim());
@@ -185,6 +190,84 @@ function buildStepOptions(){
   if(!STEP_MULTS.includes(S.stepMult)) S.stepMult=1;
   S.step=S.stepMult*S.tick; updateStepBtn();
 }
+// ── ИСТОЧНИК СТАКАНА: Ourbit (SSE) ↔ WEEX (опрос /api/weexdepth) ──
+const EX_DOM = { ourbit:"ourbit.com", weex:"weex.com" };
+const EX_LBL = { ourbit:"Ourbit", weex:"WEEX" };
+function exBadge(ex){ const d=EX_DOM[ex]||""; return '<img src="https://icons.duckduckgo.com/ip3/'+d+'.ico" style="width:13px;height:13px;vertical-align:-2px;border-radius:2px;margin-right:3px" onerror="this.style.display=\'none\'">'+EX_LBL[ex]; }
+function setExBadge(ex){ const b=$("exbtn"); if(!b) return; b.innerHTML=exBadge(ex);
+  const w=ex==="weex"; b.style.background=w?"#3a2a12":"#233152"; b.style.color=w?"#ffcf7a":"#9fc0ff"; b.style.borderColor=w?"#5a3a12":"#2c3444"; }
+function ssExBadge(ex){ const d=EX_DOM[ex], c=ex==="weex"?"#e6a943":"#16c784";
+  return '<span class="ss-ex" data-ex="'+ex+'" title="открыть на '+EX_LBL[ex]+'" style="display:inline-flex;align-items:center;gap:2px;margin-left:5px;padding:1px 5px;border-radius:5px;background:'+c+'22;border:1px solid '+c+'55;font-size:10px;font-weight:700;color:'+c+'"><img src="https://icons.duckduckgo.com/ip3/'+d+'.ico" style="width:11px;height:11px;border-radius:2px" onerror="this.style.display=\'none\'">'+EX_LBL[ex]+'</span>'; }
+S._weexSet=null;   // Set монет, которые есть на WEEX (для ярлыков в поиске)
+function loadWeexSyms(){ fetch("/api/weexsyms").then(x=>x.json()).then(r=>{ if(r&&r.ok&&r.syms) S._weexSet=new Set(r.syms.map(s=>s.toUpperCase())); }).catch(()=>{}); }
+function weexApplyTick(tick){ const t=parseFloat(tick); if(t>0){ S.tick=t; S.dec=decimalsOf(t); } S.contractSize=1; buildStepOptions(); }
+async function weexPoll(){
+  if(!S.exWeex) return;
+  try{ const r=await fetch("/api/weexdepth?symbol="+encodeURIComponent(S.symbol)).then(x=>x.json());
+    if(r&&r.ok&&r.depth&&r.depth.bids&&r.depth.bids.length){ if(r.tick) weexApplyTick(r.tick); S.depth=r.depth; S._render=true; status("live","WEEX"); }
+    else status("err","нет на WEEX"); }catch(e){}
+}
+async function weexPollTrades(){   // лента сделок WEEX → принты в стакане + проедание
+  if(!S.exWeex) return;
+  try{ const r=await fetch("/api/weextrades?symbol="+encodeURIComponent(S.symbol)).then(x=>x.json());
+    if(r&&r.ok&&r.ticks&&r.ticks.length){
+      if(!S._weexSeen) S._weexSeen=new Set();
+      const fresh=[];
+      for(const tk of r.ticks){ const id=(tk.id!=null?tk.id:(tk.t+"_"+tk.p+"_"+tk.v)); if(!S._weexSeen.has(id)){ S._weexSeen.add(id); fresh.push({t:tk.t,p:tk.p,v:tk.v,side:tk.side}); } }
+      if(fresh.length){ fresh.sort((a,b)=>a.t-b.t);
+        S.flow.ticks=(S.flow.ticks||[]).concat(fresh).slice(-3000);
+        S.flow.now=Math.max(S.flow.now||0, fresh[fresh.length-1].t);
+        if(window.tapeFeed) tapeFeed(fresh); S._render=true; }
+      if(S._weexSeen.size>6000) S._weexSeen=new Set();
+    } }catch(e){}
+}
+function _weexStart(){ if(!S._weexTimer) S._weexTimer=setInterval(weexPoll,350); if(!S._weexTradesTimer) S._weexTradesTimer=setInterval(weexPollTrades,350); weexPoll(); weexPollTrades(); }   // сервер отдаёт из WS-кэша мгновенно → можно чаще (почти real-time)
+function _weexStop(){ if(S._weexTimer){ clearInterval(S._weexTimer); S._weexTimer=null; } if(S._weexTradesTimer){ clearInterval(S._weexTradesTimer); S._weexTradesTimer=null; } }
+function weexResetFlow(){ S.flow={footprint:[],ticks:[],delta:[],now:0}; S._weexSeen=new Set(); }
+function setWeexMode(on){
+  S.exWeex=!!on;
+  if(on){ if(_es){ try{_es.close();}catch(e){} } S.depth=null; S.centerS=null; weexResetFlow();   // своя лента WEEX
+    _weexStart(); setExBadge("weex"); }
+  else { _weexStop(); S.depth=null; S.centerS=null; weexResetFlow();
+    applySymbolMeta(); if(typeof connectStream==="function") connectStream();
+    fetch("/api/depth?symbol="+encodeURIComponent(S.symbol)).then(x=>x.json()).then(d=>{ if(d&&d.ok&&d.depth){ S.depth=d.depth; S._render=true; } }).catch(()=>{});
+    setExBadge("ourbit"); }
+}
+window.setWeexMode=setWeexMode;
+// окошко выбора биржи для текущей монеты (как ярлыки в поиске), открывается кликом по значку в шапке
+function openExPicker(){
+  const old=$("expick"); if(old){ old.remove(); return; }              // повторный клик — закрыть
+  const b=$("exbtn"); if(!b) return;
+  const base=(S.symbol||"").replace("_USDT","");
+  const onOur=!!(S.instr && S.instr[S.symbol]), onWx=!!(S._weexSet && S._weexSet.has(base));
+  const box=document.createElement("div"); box.id="expick";
+  box.style.cssText="position:fixed;z-index:99999;background:#181c24;border:1px solid #2c3444;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.5);padding:4px;min-width:130px";
+  const r=b.getBoundingClientRect(); box.style.left=Math.round(r.left)+"px"; box.style.top=Math.round(r.bottom+5)+"px";
+  const mk=(ex,avail)=>{ const it=document.createElement("div"); const cur=(ex==="weex")===S.exWeex;
+    it.style.cssText="display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:6px;font-size:12px;font-weight:700;cursor:"+(avail?"pointer":"default")+";color:"+(avail?(cur?"#ffcf7a":"#dfe5ee"):"#5a6472")+";opacity:"+(avail?"1":".45")+";background:"+(cur&&avail?"#2a2f3a":"");
+    it.innerHTML='<img src="https://icons.duckduckgo.com/ip3/'+EX_DOM[ex]+'.ico" style="width:14px;height:14px;border-radius:2px" onerror="this.style.display=\'none\'">'+EX_LBL[ex]+(avail?(cur?" ✓":""):" — нет");
+    if(avail){ it.onmouseenter=()=>{ if(!cur) it.style.background="#232b39"; }; it.onmouseleave=()=>{ it.style.background=(cur?"#2a2f3a":""); };
+      it.onclick=()=>{ box.remove(); setWeexMode(ex==="weex"); }; }
+    return it; };
+  box.appendChild(mk("ourbit", onOur)); box.appendChild(mk("weex", onWx));
+  document.body.appendChild(box);
+  setTimeout(()=>{ const close=(e)=>{ if(!box.contains(e.target)&&e.target!==b){ box.remove(); document.removeEventListener("mousedown",close,true); } }; document.addEventListener("mousedown",close,true); },0);
+}
+window.openExPicker=openExPicker;
+// открыть монету на конкретной бирже (из скринера/поиска). WEEX-монету НЕ гоняем через switchSymbol (он дёргает Ourbit-поток).
+function openSymbolOn(sym, ex){
+  if(!sym) return; const base=sym.replace("_USDT","");
+  if(ex==="weex"){
+    S.symbol=sym; const bt=$("booktitle"); if(bt) bt.textContent=base; const si=$("symbol"); if(si) si.value=base;
+    S.centerS=null;
+    if(!S.exWeex) setWeexMode(true); else { weexResetFlow(); weexPoll(); weexPollTrades(); }   // уже на WEEX — обновить стакан+ленту под новый символ
+  } else {
+    if(typeof switchSymbol==="function") switchSymbol(sym);
+    const si=$("symbol"); if(si) si.value=base;
+    if(S.exWeex) setWeexMode(false);                    // вернуться с WEEX на Ourbit
+  }
+}
+window.openSymbolOn=openSymbolOn;
 function updateStepBtn(){ const b=$("stepbtn"); if(b) b.textContent="×"+S.stepMult;
   const p=$("pt6x"); if(p) p.textContent="×"+S.stepMult; }
 function wirePanelTools(){
@@ -453,24 +536,12 @@ function renderLadder(){
       // ФИКС ТЕНЕЙ: только для уровней ВНУТРИ книги (бид/аск), не в разрыве спреда — иначе при рывке цены
       // выпавший из книги уровень даёт фантомную «серую» вспышку там, где объёма уже нет.
       const inBook = (s<=bbS)||(s>=baS);
-      const prev=pv.get(s);
-      if(inBook && prev!=null && vc>0 && vc < prev-Math.max(1,prev*0.05)){
-        // ТОЛЬКО проедание СДЕЛКОЙ = короткая цветная вспышка. Снятие лимитки (без сделки) = мгновенно, БЕЗ серого следа.
-        const traded = EXE[i] && unitVal(EXE[i],price) >= unitVal(prev-vc,price)*0.4;
-        if(traded) fl.set(s,{t:nowP, k:(isAsk?1:-1)}); else fl.delete(s);
-      } else if(!inBook && fl.has(s)) fl.delete(s);          // уровень ушёл в спред — гасим вспышку сразу
-      pv.set(s, vc);
+      pv.set(s, vc);   // (совместимость; проедание теперь по EXE — фактическим сделкам, ниже)
       const halfT=Math.round(hT/2), yc=y+hT/2;
       // фон строки: лучший бид/аск / сжатый спред
       if(isMid){ g.fillStyle=P.bidBg; g.fillRect(0,yT,LW,halfT); g.fillStyle=P.askBg; g.fillRect(0,yT+halfT,LW,hT-halfT); }
       else if(isBB){ g.fillStyle=P.bidBg; g.fillRect(0,yT,LW,hT); }
       else if(isBA){ g.fillStyle=P.askBg; g.fillRect(0,yT,LW,hT); }
-      // ВСПЫШКА ТОЛЬКО проедания сделкой (цвет стороны, затухание 300мс). Серой «pulled»-вспышки больше нет.
-      const f=fl.get(s);
-      if(f){ const age=nowP-f.t;
-        if(age<300){ const a=(1-age/300)*0.5;
-          g.fillStyle=(f.k>0?P.flashBuy:P.flashSell)+a.toFixed(3)+")"; g.fillRect(0,yT,DW,hT); }
-        else fl.delete(s); }
       // полоса плотности (янтарь; стена ярче) + айсберг + число — БЕЗ inset: соседние полосы сливаются в сплошной блок
       if(vc){ const barW=Math.max(6,Math.min(DW,uv/fillBasis*DW));
         g.fillStyle=isWall?P.barWall:P.bar; g.fillRect(0,yT,barW,hT);   // числа+полоса вместе слева, растёт вправо к цене
@@ -512,7 +583,7 @@ function renderLadder(){
     // проверка пересечения ценой → звук (один раз на пересечение)
     if(alerts.length && S._lastAlertMid!=null){
       for(const ap of alerts){ if((S._lastAlertMid<ap && mid>=ap)||(S._lastAlertMid>ap && mid<=ap)){
-        try{ if(typeof beep==="function") beep(mid>=ap?1:2, true); }catch(e){}
+        // звук будильника ОТКЛЮЧЁН (юзер: только открытие/закрытие позиции); визуальное уведомление оставляем
         try{ if(window.notify) notify("🔔 "+S.symbol.replace("_USDT","")+" достиг "+ap.toFixed(dec), "alert"); }catch(e){} } }
     }
     S._lastAlertMid=mid;
@@ -653,6 +724,10 @@ let _fpSig="";
 function renderFootprint(){
   const {topS,botS,rowH,h}=S.geo; if(!h) return;
   const cfg=CFG[S.unit], step=S.step;
+  // ПРОИЗВОДИТЕЛЬНОСТЬ: футпринт+лента — тяжёлый рендер, меняется медленно → отдельный троттл ~17fps
+  // (стакан рисуется свои 30fps независимо). Снимает фриз на активных монетах.
+  const _fpNow=(window.performance?performance.now():Date.now());
+  if(!S._fpForce && _fpNow-(S._fpT||0) < 58) return; S._fpT=_fpNow; S._fpForce=false;
   // ТФ<1мин (30с=0.5) → строим из тиков; иначе серверные минутные бакеты
   const fp=(S.cluTF<1)?buildFpFromTicks(Math.round((S.cluTF||0.5)*60)):groupFootprint(S.flow.footprint||[], S.cluTF), L=fp.length;
   if(S.hideFp){ const cv=$("fpcanvas"); if(cv.width){cv.width=0;} $("grid").style.width=""; return; }
@@ -775,13 +850,16 @@ function renderFootprint(){
     if(pn-(S._shotN||0)>1500){ S._shotN=pn; try{ if(window.notify) notify("▼ прострел вниз "+S.symbol.replace("_USDT","")+" "+fmt(sV),"shot"); }catch(e){} } }
   if(S._shot){ const age=pn-S._shot.lt;
     if(age<3500){ const ps=S._shot.price/step;
-      if(ps<=topS+0.5 && ps>=botS-0.5){ const y=(topS-ps+0.5)*rowH, al=0.8*(1-age/3500);
+      if(ps<=topS+0.5 && ps>=botS-0.5){ const y=(topS-ps+0.5)*rowH, al=(1-age/3500);
         const col=S._shot.side===1?"63,224,122":"255,95,89";
-        // компактная метка у стакана (без линии через поле): короткий брусок + подпись «куда стрельнуло»
-        g.fillStyle=`rgba(${col},${al.toFixed(3)})`;
-        g.fillRect(W-6, y-rowH/2, 6, rowH);                       // маркер на краю (у стакана)
-        g.font="bold 10px Verdana,sans-serif"; g.textAlign="right";
-        g.fillText((S._shot.side===1?"▲ прострел ":"▼ прострел ")+fmt(S._shot.vol), W-10, y); g.textAlign="center"; }
+        // ЗАМЕТНАЯ метка прострела: полоса-подсветка на всю ширину ленты на уровне «стрельбы»
+        g.fillStyle=`rgba(${col},${(al*0.15).toFixed(3)})`; g.fillRect(fpW, y-rowH*1.3, tapeW, rowH*2.6);
+        g.fillStyle=`rgba(${col},${(al*0.92).toFixed(3)})`; g.fillRect(W-7, y-rowH/2, 7, rowH);   // яркий брусок у края
+        // крупная стрелка + объём над уровнем
+        g.font="bold 13px Verdana,sans-serif"; g.textAlign="right";
+        g.fillStyle=`rgba(${col},${Math.min(1,al*1.4).toFixed(3)})`;
+        g.fillText((S._shot.side===1?"▲ прострел ":"▼ прострел ")+fmt(S._shot.vol), W-12, y-rowH*1.0);
+        g.textAlign="center"; }
     } else S._shot=null;
   }
   // МАРКЕР ПОЗИЦИИ у правого края левой панели (СЛЕВА от стакана): только число, цвет по стороне, прозрачный фон
@@ -914,7 +992,8 @@ function fillSet(){
   v("set-clufillUSD",CFG.USD.cluFill); v("set-clufillCoin",CFG.coin.cluFill);
   v("set-clumode",S.cluMode); v("set-clutf",S.cluTF); v("set-ladminusd",S.ladMinUsd);
   v("set-filltopn",S.fillTopN); v("set-fillmult",S.fillMult);
-  ck("set-showclu",!S.hideFp); ck("set-showvp",S.showVP!==false); ck("set-showcols",S.showCols!==false); ck("set-abbrev",S.abbrev!==false); ck("set-fillauto",S.fillAuto!==false); ck("set-colorauto",S.colorAuto!==false); ck("set-sound",S.sound===true);
+  ck("set-showclu",!S.hideFp); ck("set-showvp",S.showVP!==false); ck("set-showcols",S.showCols!==false); ck("set-abbrev",S.abbrev!==false); ck("set-fillauto",S.fillAuto===true); ck("set-colorauto",S.colorAuto!==false); ck("set-sound",S.sound===true);
+  ck("set-automarketos", S.fillAuto===true && S.colorAuto!==false);   // авто-маркетос = обе авто-настройки включены
   ck("set-topstab",S.topStab!==false); ck("set-autocenter",S.autoCenter===true); v("set-tophold",S.topHold);
   v("set-stepmult",S.stepMult); v("set-theme",S.theme);
   renderKeyList(); updateAutoFields();
@@ -1003,6 +1082,9 @@ function wireSettings(){
   $("set-lev").onchange=()=>{ S.lev=parseInt($("set-lev").value,10)||S.lev; };
   const fa=$("set-fillauto"); if(fa) fa.addEventListener("change",updateAutoFields);
   const ca=$("set-colorauto"); if(ca) ca.addEventListener("change",updateAutoFields);
+  const am=$("set-automarketos"); if(am) am.addEventListener("change",()=>{   // «Авто-маркетос» = включить обе авто-настройки разом
+    if($("set-fillauto")) $("set-fillauto").checked=am.checked;
+    if($("set-colorauto")) $("set-colorauto").checked=am.checked; updateAutoFields(); });
   wireProxy();
 }
 
@@ -1172,11 +1254,7 @@ function connectStream(){
   _es.onmessage=(e)=>{ let m; try{ m=JSON.parse(e.data); }catch(err){ return; }
     if(m.t==="depth"){ if(m.depth && m.depth.bids && m.depth.bids.length && m.depth.asks && m.depth.asks.length){ S.depth=m.depth; S._render=true; } }   // пустой кадр НЕ затираем — иначе стакан резко пропадал («нет стакана»)
     else if(m.t==="ticks"){
-      if(S.sound && m.ticks && m.ticks.length){       // звук на КРУПНЫЙ принт (только новые с прошлого раза)
-        const big=S.tickBig||5000; let last=S._sndT||0, mx=last;
-        for(const tk of m.ticks){ if(tk.t>last){ const u=unitVal(tk.v,tk.p); if(u>=big) beep(tk.side, u>=big*3); if(tk.t>mx)mx=tk.t; } }
-        S._sndT=mx;
-      } else if(m.ticks && m.ticks.length){ S._sndT=m.ticks[m.ticks.length-1].t; }
+      if(m.ticks && m.ticks.length){ S._sndT=m.ticks[m.ticks.length-1].t; }   // звук на крупный принт ОТКЛЮЧЁН (юзер: только открытие/закрытие позиции)
       if(window.tapeFeed) tapeFeed(m.ticks);          // колоночная лента (ring buffer)
       S.flow.ticks=m.ticks; S.flow.now=m.now; S._render=true; renderFlowMeter();
     }   // быстрая лента (пузыри успевают за ценой)
@@ -1328,6 +1406,9 @@ function wireTemplates(){
   try{ if(new URLSearchParams(location.search).has("dom")) document.body.classList.add("dom-embed"); }catch(e){}  // режим «только стакан» (в iframe отдельного окна)
   applyRowH(S.rowCss); applyLadWidth(S.ladWidth); applyTheme(S.theme);
   await loadInstruments(); wireButtons(); wireSettings(); wireLots(); wireCluEdge(); wireTemplates(); wirePanelTools(); wireBookWin();
+  // источник стакана: значок биржи открывает окошко выбора биржи для текущей монеты (как ярлыки в поиске)
+  setExBadge("ourbit"); loadWeexSyms();
+  { const eb=$("exbtn"); if(eb) eb.onclick=(e)=>{ e.stopPropagation(); openExPicker(); }; }
   pollTicker(); setInterval(pollTicker, 5000);
   let restored=false;
   try{ const cur=localStorage.getItem("gc_dom_cur"); if(cur){ applyConfig(JSON.parse(cur)); restored=true; } }catch(e){}

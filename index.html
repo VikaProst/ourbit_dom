@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>🐸 SQUAD TERMINAL</title>
-<link rel="stylesheet" href="/style.css?v=b129" />
+<link rel="stylesheet" href="/style.css?v=b149" />
 <script>try{var _s=location.search;if(_s.indexOf("dom")>=0)document.documentElement.classList.add("dom-embed");if(_s.indexOf("screener")>=0)document.documentElement.classList.add("scr-embed");}catch(e){}</script>
 </head>
 <body>
@@ -41,7 +41,7 @@
   </div>
 
   <div id="bookwin" class="wbwin" style="left:6px;top:48px;width:900px;height:86vh">
-    <div class="wbtitle" id="bookdrag"><span class="wbcoin" id="booktitle">XAUT</span><span style="color:var(--muted)">· DOM</span>
+    <div class="wbtitle" id="bookdrag"><span id="exbtn" title="биржа стакана — клик: выбрать (Ourbit / WEEX)" style="padding:1px 7px;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;background:#233152;color:#9fc0ff;border:1px solid #2c3444;user-select:none">Ourbit</span><span class="wbcoin" id="booktitle" style="margin-left:8px">XAUT</span>
       <span id="symtabs"></span><button id="symtabadd" title="добавить вкладку текущей монеты">＋</button><span class="wbsp"></span></div>
     <div class="wbbody" id="bookbody">
   <div id="chartdock"></div>
@@ -130,6 +130,7 @@
           </div>
         </div>
         <div class="stabpane" data-pane="book">
+          <label class="chk"><input type="checkbox" id="set-automarketos"> 🎯 <b>Авто-маркетос</b> <span class="hintc">авто-подсветка стен на КАЖДОЙ монете (включает обе авто-настройки ниже)</span></label>
           <label class="chk"><input type="checkbox" id="set-fillauto"> Авто-заполненность (нормировать бары по стакану)</label>
           <label class="chk"><input type="checkbox" id="set-colorauto"> Авто-цвет крупных (пороги оранж/красный от стакана)</label>
           <label>Кол-во крупных заявок (авто) <span class="hintc">топ-N</span><input type="number" id="set-filltopn"></label>
@@ -321,11 +322,11 @@
   </div>
 
   <div id="perfhud"></div>
-  <script src="/app.js?v=b129"></script>
-  <script src="/trade.js?v=b129"></script>
-  <script src="/dock.js?v=b129"></script>
-  <script src="/chart.js?v=b129"></script>
-  <script src="/screener.js?v=b129"></script>
+  <script src="/app.js?v=b149"></script>
+  <script src="/trade.js?v=b149"></script>
+  <script src="/dock.js?v=b149"></script>
+  <script src="/chart.js?v=b149"></script>
+  <script src="/screener.js?v=b149"></script>
   <div id="watchwin" class="wbwin hidden" style="left:20px;right:auto;top:130px;width:260px;height:380px">
     <div class="wbtitle" id="watchdrag">
       <span class="wbcoin">★ ВОЧЛИСТ</span>
@@ -337,7 +338,7 @@
     <div class="wbbody" id="watchbody"><table class="scrtbl"><tbody id="watchrows"></tbody></table></div>
     <div class="wbresize" id="watchres"></div>
   </div>
-  <script src="/tape.js?v=b129"></script>
+  <script src="/tape.js?v=b149"></script>
   <div id="finwin" class="wbwin hidden" style="left:auto;right:20px;top:200px;width:440px;height:420px">
     <div class="wbtitle" id="findrag"><span class="wbcoin">💼 ФИНРЕЗ</span><span class="wbsp"></span><button class="wbx" id="finclose">×</button></div>
     <div class="wbbody" id="finbody">
@@ -348,15 +349,15 @@
     </div>
     <div class="wbresize" id="finres"></div>
   </div>
-  <script src="/watchlist.js?v=b129"></script>
+  <script src="/watchlist.js?v=b149"></script>
   <div id="notifwin" class="wbwin hidden" style="left:auto;right:20px;top:280px;width:320px;height:340px">
     <div class="wbtitle" id="notifdrag"><span class="wbcoin">🔔 УВЕДОМЛЕНИЯ</span><span class="wbsp"></span><button class="wbx" id="notifclr" title="очистить">🗑</button><button class="wbx" id="notifclose">×</button></div>
     <div class="wbbody" id="notifbody"><div id="notiflist"></div></div>
     <div class="wbresize" id="notifres"></div>
   </div>
-  <script src="/finrez.js?v=b129"></script>
-  <script src="/notifications.js?v=b129"></script>
-  <script src="/theme.js?v=b129"></script>
+  <script src="/finrez.js?v=b149"></script>
+  <script src="/notifications.js?v=b149"></script>
+  <script src="/theme.js?v=b149"></script>
 
   <div id="wswin" class="wbwin hidden" style="left:40px;top:70px;width:1040px;height:72vh">
     <div class="wbtitle" id="wsdrag"><span class="wbcoin">▦ РАСКЛАДКА</span>
@@ -366,6 +367,6 @@
     <div class="wbbody" id="wsbody"><div id="wsroot"></div></div>
     <div class="wbresize" id="wsres"></div>
   </div>
-  <script src="/tile.js?v=b129"></script>
+  <script src="/tile.js?v=b149"></script>
 </body>
 </html>

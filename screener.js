@@ -177,9 +177,21 @@
       html+="</tr>";
     }
     tb.innerHTML=html;
-    tb.querySelectorAll(".scrrow").forEach(tr=>{ tr.onclick=()=>{ const sym=tr.dataset.sym, ex=tr.dataset.ex;
-      if(ex && ex!=="ourbit"){ if(typeof notify==="function") notify("Линк только для Ourbit; "+sym.replace("_USDT","")+" на "+ex.toUpperCase()+" — данные скринера","info"); return; }
-      if(typeof switchSymbol==="function"&&sym){ switchSymbol(sym); const inp=g("symbol"); if(inp) inp.value=sym.replace("_USDT",""); } }; });
+    tb.querySelectorAll(".scrrow").forEach(tr=>{ tr.onclick=()=>{ const sym=tr.dataset.sym; if(!sym) return; const base=sym.replace("_USDT","");
+      // 1) копируем название в буфер (для вставки в WEEX и т.п.)
+      try{ navigator.clipboard.writeText(base); if(typeof notify==="function") notify("📋 "+base+" — скопировано","ok"); }catch(e){}
+      // 2) открываем стакан на бирже, которую ты выбрала ГЛАВНОЙ в скринере (row.ex). Если DOM её не поддерживает — фолбэк.
+      const hasS=(typeof S!=="undefined");
+      const onOur = hasS && S.instr && S.instr[sym];
+      const onWx  = hasS && S._weexSet && S._weexSet.has(base);
+      const rowEx = tr.dataset.ex || "ourbit";
+      if(typeof openSymbolOn==="function"){
+        if(rowEx==="weex" && onWx) openSymbolOn(sym,"weex");        // WEEX главная → стакан WEEX
+        else if(rowEx==="ourbit" && onOur) openSymbolOn(sym,"ourbit");
+        else if(onOur) openSymbolOn(sym,"ourbit");                  // фолбэк: есть на Ourbit
+        else if(onWx) openSymbolOn(sym,"weex");                     // фолбэк: есть на WEEX
+        else if(typeof notify==="function") notify(base+" — DOM поддерживает только Ourbit/WEEX (эта биржа — данные)","info");
+      } else if(typeof switchSymbol==="function"){ switchSymbol(sym); const inp=g("symbol"); if(inp) inp.value=base; } }; });
   }
 
   async function poll(){
