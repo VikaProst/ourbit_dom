@@ -1540,15 +1540,23 @@ class Handler(BaseHTTPRequestHandler):
                 _t0 = time.time()
                 try:
                     close_pid = None
-                    if side in (2, 4):   # ЗАКРЫТИЕ: берём РЕАЛЬНЫЙ positionId с биржи (без него Ourbit ОТКРЫВАЕТ противоположную!)
-                        want_long = (side == 4)   # 4=CLOSE_LONG закрывает лонг, 2=CLOSE_SHORT закрывает шорт
-                        try: poslist = _OB.positions(sym)
-                        except Exception: poslist = []
-                        match = next((p for p in poslist if (p.get("side") == 1) == want_long and p.get("id")), None)
-                        if not match:   # позиции нужной стороны НЕТ → НЕ открываем противоположную
-                            self._json({"ok": False, "error": "закрывать нечего: позиция не найдена на бирже (противоположную НЕ открываю)"}); return
-                        close_pid = match["id"]
-                        if match.get("vol"): vol = min(vol, int(match["vol"]))   # не больше реального объёма позиции
+                    if side in (2, 4):   # ЗАКРЫТИЕ: нужен positionId (без него Ourbit ОТКРЫВАЕТ противоположную!)
+                        try: client_pid = int(b.get("positionId") or 0)
+                        except (TypeError, ValueError): client_pid = 0
+                        if client_pid > 0:
+                            # БЫСТРЫЙ ПУТЬ: клиент прислал свежий id позиции (обновляется раз в 1.5с) → БЕЗ лишнего round-trip к бирже (~250мс быстрее).
+                            # Закрытие С positionId = reduce-only: противоположную НЕ откроет (х2-баг был только при отсутствии id).
+                            close_pid = client_pid
+                        else:
+                            # id нет → безопасный путь: тянем позицию с биржи (+1 round-trip)
+                            want_long = (side == 4)   # 4=CLOSE_LONG закрывает лонг, 2=CLOSE_SHORT закрывает шорт
+                            try: poslist = _OB.positions(sym)
+                            except Exception: poslist = []
+                            match = next((p for p in poslist if (p.get("side") == 1) == want_long and p.get("id")), None)
+                            if not match:   # позиции нужной стороны НЕТ → НЕ открываем противоположную
+                                self._json({"ok": False, "error": "закрывать нечего: позиция не найдена на бирже (противоположную НЕ открываю)"}); return
+                            close_pid = match["id"]
+                            if match.get("vol"): vol = min(vol, int(match["vol"]))   # не больше реального объёма позиции
                     sc, resp = _OB.create(sym, side, otype, vol, b.get("price", 0), int(b.get("leverage", 50)),
                                           position_id=close_pid)
                 except Exception:
@@ -1559,6 +1567,12 @@ class Handler(BaseHTTPRequestHandler):
                                 "error": "СЕТЬ/ТАЙМАУТ: ордер мог исполниться — проверь позицию", "positions": pos}); return
                 srv_ms = round((time.time() - _t0) * 1000)   # чистое время round-trip к бирже
                 ok = bool(resp.get("success"))
+                if not ok:   # ВРЕМЕННО: логируем полный ответ биржи при отказе — чтобы увидеть настоящую причину «Unknown error»
+                    try:
+                        with open(os.path.join(HERE, "order_log.txt"), "a", encoding="utf-8") as _lf:
+                            _lf.write(f"{time.strftime('%H:%M:%S')} REJECT lev={b.get('leverage')} side={side} vol={vol} px={b.get('price')} otype={otype} http={sc} resp={json.dumps(resp, ensure_ascii=False)}\n")
+                    except Exception:
+                        pass
                 # серверный стоп/снятие — В ФОНЕ, чтобы ответ на ордер уходил МГНОВЕННО (без задержки)
                 if ok and side in (2, 4):        # закрытие позиции → снять биржевые стопы (фоном)
                     threading.Thread(target=_async_cancel_plans, args=(sym,), daemon=True).start()

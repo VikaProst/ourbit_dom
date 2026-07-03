@@ -587,7 +587,8 @@ function renderLadder(){
     }
   }
   S.bestBid=bestBid; S.bestAsk=bestAsk; S.baS=baS; S.bbS=bbS;
-  // ЛИНЕЙКА USDT (зажать L + тянуть): суммарный объём бид+аск в выделенном диапазоне цен
+  if(cv){ const g=cv.getContext("2d");   // тот же контекст холста (синглтон, dpr-трансформ сохранён) — g из блока выше здесь вне области видимости
+  // ЛИНЕЙКА USDT (зажать L + вести мышь): синяя полоса + Σ$ суммарного объёма бид+аск в диапазоне
   if(S._ruler){
     const _rc=S.contractSize||1, sHi=Math.max(S._ruler.a,S._ruler.b), sLo=Math.min(S._ruler.a,S._ruler.b);
     let sumUsd=0;
@@ -595,12 +596,14 @@ function renderLadder(){
     const yHi=Math.round((topS-sHi)*rH), yLo=Math.round((topS-sLo+1)*rH);
     g.fillStyle="rgba(120,170,255,.12)"; g.fillRect(0,yHi,LW,yLo-yHi);
     g.strokeStyle="rgba(120,170,255,.6)"; g.lineWidth=1; g.strokeRect(0.5,yHi+0.5,LW-1,Math.max(1,yLo-yHi-1));
-    const lbl="Σ "+(typeof fmt==="function"?fmt(sumUsd):Math.round(sumUsd))+"$";
+    const _pTop=sHi*step, _pBot=sLo*step, _pct=_pBot>0?((_pTop-_pBot)/_pBot*100):0;   // размах диапазона в % (цена верх/низ выделения)
+    const lbl=_pct.toFixed(2).replace(".",",")+"%";
     g.font="bold 11px Arial,sans-serif"; g.textAlign="center"; g.textBaseline="middle";
     const tw=Math.ceil(g.measureText(lbl).width)+10, by=Math.round((yHi+yLo)/2-8);
     g.fillStyle="rgba(50,80,150,.95)"; g.fillRect(LW/2-tw/2,by,tw,16);
     g.fillStyle="#dce8ff"; g.fillText(lbl,LW/2,by+8); g.textBaseline="alphabetic"; g.textAlign="left";
   }
+  }   // конец if(cv) для линейки
   // ЦЕНТРОВКА ПО КЛАВИШЕ + АВТО-ЦЕНТРОВКА С ГИСТЕРЕЗИСОМ (опция, для волатильности)
   const sc=$("scroller");
   if(sc && S.autoCenter && !S._centerReq && (window.performance?performance.now():Date.now())-(S._userScrollT||0)>2500){
@@ -1133,6 +1136,20 @@ function beep(side, strong){
   g.gain.exponentialRampToValueAtTime(0.0001, t+0.14);
   o.start(t); o.stop(t+0.15);
 }
+// звук ОТКРЫТИЯ (восходящий до→соль) / ЗАКРЫТИЯ (нисходящий соль→ми) позиции — двойной тон, отличается от бипов ленты
+function posSound(opened){
+  const a=_audio(); if(!a) return;
+  const seq = opened ? [523,784] : [784,392];
+  seq.forEach((f,i)=>{
+    const o=a.createOscillator(), g=a.createGain(), t=a.currentTime+i*0.11;
+    o.type="triangle"; o.frequency.value=f; o.connect(g); g.connect(a.destination);
+    g.gain.setValueAtTime(0.0001,t);
+    g.gain.exponentialRampToValueAtTime(0.28, t+0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, t+0.1);
+    o.start(t); o.stop(t+0.11);
+  });
+}
+window.posSound=posSound;
 // ИНДИКАТОР ПОТОКА: куда «стреляет» лента (перекос агрессии buy/sell за 4с) + скорость (сделок/сек)
 function renderFlowMeter(){
   const el=$("flowmeter"); if(!el) return;
@@ -1153,7 +1170,7 @@ function connectStream(){
   if(_es){ try{ _es.close(); }catch(e){} }
   _es=new EventSource("/api/stream?symbol="+encodeURIComponent(S.symbol));
   _es.onmessage=(e)=>{ let m; try{ m=JSON.parse(e.data); }catch(err){ return; }
-    if(m.t==="depth"){ S.depth=m.depth; S._render=true; }
+    if(m.t==="depth"){ if(m.depth && m.depth.bids && m.depth.bids.length && m.depth.asks && m.depth.asks.length){ S.depth=m.depth; S._render=true; } }   // пустой кадр НЕ затираем — иначе стакан резко пропадал («нет стакана»)
     else if(m.t==="ticks"){
       if(S.sound && m.ticks && m.ticks.length){       // звук на КРУПНЫЙ принт (только новые с прошлого раза)
         const big=S.tickBig||5000; let last=S._sndT||0, mx=last;

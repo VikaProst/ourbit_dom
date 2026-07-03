@@ -70,7 +70,11 @@ async function sendOrder(side, otype, price, label, volOverride, positionId, sym
   if(r.ok){ log(`✅ ${label} принят (vol=${vol}) · ${pms}мс`,"ok");
     if(otype===OT.LIMIT && px>0){                            // ОПТИМИСТИЧНО показать лимитку в стакане СРАЗУ (не ждать опрос счёта ~1с)
       const oid=(r.resp&&r.resp.data&&(r.resp.data.orderId||r.resp.data.id||r.resp.data))||("tmp"+Date.now());
-      T.orders=(T.orders||[]).concat([{id:oid, side, price:px, vol}]); S._render=true;
+      const ord={id:oid, side, price:px, vol};
+      T.orders=(T.orders||[]).concat([ord]);
+      if(!T._pending) T._pending=new Map();
+      T._pending.set(oid, {ord, exp:Date.now()+3500});       // держим оптимистично ~3.5с: биржа отдаёт open_orders с задержкой → иначе заявка МИГАЕТ (пропала→появилась)
+      S._render=true;
     }
   }
   else if(r.maybe_filled){                                   // ORPHAN-защита: ордер МОГ исполниться
@@ -196,11 +200,22 @@ async function refreshAccount(verbose){
     const r=await fetch("/api/account?symbol="+encodeURIComponent(S.symbol)).then(x=>x.json());
     if(!r.ok){ if(verbose) log("ошибка обновления счёта","err"); return; }
     T.pos=(r.positions&&r.positions[0])||null;
+    if(T._acctInit && (!!T.pos)!==hadPos && window.posSound) posSound(!!T.pos);   // позиция появилась→звук откр / исчезла→звук закр (не на первом refresh)
+    T._acctInit=true;
     let orders=r.orders||[];
     // НЕ воскрешать только что отменённые заявки: биржа отдаёт open_orders с задержкой после отмены → был фликер (пропал→появился→пропал)
     if(T._cancelled && T._cancelled.size){ const now=Date.now();
       for(const [id,exp] of T._cancelled){ if(exp<now) T._cancelled.delete(id); }   // истёкшие метки убрать
       orders=orders.filter(o=>!T._cancelled.has(o.id)); }
+    // НЕ дать только что ПОСТАВЛЕННОЙ заявке моргнуть: биржа показывает её в open_orders с задержкой → держим оптимистичную, пока биржа не подтвердит/не истечёт таймер
+    if(T._pending && T._pending.size){ const now=Date.now();
+      const haveId=new Set(orders.map(o=>String(o.id)));                          // сверка по id (нормализуем тип число/строка)
+      const havePx=new Set(orders.map(o=>o.side+"@"+snapPx(o.price||0)));         // + сверка по сторона+цена (на случай tmp-id / иного типа id)
+      for(const [id,rec] of T._pending){
+        const key=rec.ord.side+"@"+snapPx(rec.ord.price||0);
+        if(rec.exp<now || haveId.has(String(id)) || havePx.has(key) || (T._cancelled&&T._cancelled.has(id))){ T._pending.delete(id); continue; }   // подтверждена биржей (по id или цене) / истекла / отменена
+        orders=orders.concat([rec.ord]); }   // ещё не видна на бирже — показываем оптимистичную
+    }
     T.orders=orders;
     if(verbose){ const no=(r.orders||[]).length, p=T.pos;   // ↻ переподключение: показать ВСЁ что реально стоит на бирже
       log(`↻ синхронизация: заявок на бирже ${no}${p?`, позиция ${p.side===1?"LONG":"SHORT"} ${fmt(p.vol)} @ ${p.avg}`:", позиции нет"}`,"ok"); }
@@ -236,13 +251,13 @@ function wireMouse(){
     return { s, price:s*S.step, isAsk:s>=S.baS, isBid:s<=S.bbS }; }
   cv.addEventListener("mousemove",(e)=>{ const L=lvl(e); if(L.price!==S.hover) S.hover=L.price;
     S._hoverPri=true;
-    if(window.rulerHeld && S._ruler){ S._ruler.b=L.s; }   // ЛИНЕЙКА USDT: тянем нижнюю границу
+    S._lastS=L.s;   // запоминаем строку под курсором — чтобы линейка появилась сразу при нажатии L
+    if(window.rulerHeld){ const anc=(L.s>=S.baS?S.baS:S.bbS); S._ruler={a:anc, b:L.s}; }   // ЛИНЕЙКА USDT: от края спреда до курсора (просто держи L и веди мышь)
     if(window.markDirty) markDirty(); });   // приоритетный кадр — ховер следует за курсором плавно (обходит FPS-троттл)
   cv.addEventListener("mouseleave",()=>{ S.hover=null; if(window.markDirty) markDirty(); });
-  // ЛИНЕЙКА USDT: зажать L + тянуть по стакану = замер суммарного объёма в диапазоне
-  cv.addEventListener("mousedown",(e)=>{ if(e.button===0 && window.rulerHeld){ e.preventDefault();
-    S._ruler={a:lvl(e).s, b:lvl(e).s}; if(window.markDirty) markDirty(); } });
-  // механика MetaScalp: через спред (в чужую зону) = МАРКЕТ, в свою глубину = ЛИМИТ
+  // фокус клавиатуры мог застрять на поле ввода (размер/символ) — тогда L и др. клавиши не долетают до стакана.
+  // при клике/наведении на стакан снимаем фокус с поля, чтобы горячие клавиши работали всегда.
+  cv.addEventListener("mousedown",()=>{ const a=document.activeElement; if(a&&(a.tagName==="INPUT"||a.tagName==="SELECT")&&a.blur) a.blur(); });
   cv.addEventListener("click",(e)=>{
     if(window.rulerHeld){ return; }   // зажата L (линейка) — не торговать
     if(window.fHeld){ if(T.pos && T.pos.vol>0) closeLimit(lvl(e).price);   // ЗАЖАТА F = «заявка на закрытие» (MetaScalp «Зажать ГК»)
@@ -280,7 +295,10 @@ function wireKeys(){
     if(e.target.tagName==="INPUT"||e.target.tagName==="SELECT") return;
     if(window._bindingKey) return;   // идёт назначение клавиши в настройках — не выполнять действия
     const sc=document.getElementById("scroller"), code=e.code, K=S.keys||{};
-    if(code==="KeyL"){ window.rulerHeld=true; return; }   // ЗАЖАТЬ L = линейка USDT (тянуть по стакану = замер объёма в диапазоне)
+    if(code==="KeyL"){ if(!e.repeat){ window.rulerHeld=!window.rulerHeld;   // L = ПЕРЕКЛЮЧАТЕЛЬ линейки USDT (нажал вкл → водишь мышь → нажал выкл). Переживает потерю фокуса/скриншот
+        if(window.rulerHeld){ if(S._lastS!=null){ const anc=(S._lastS>=S.baS?S.baS:S.bbS); S._ruler={a:anc, b:S._lastS}; } }
+        else { S._ruler=null; }
+        if(window.markDirty) markDirty(); } return; }
     if(code==="KeyF"){ window.fHeld=true; updateCloseMode(); return; }   // ЗАЖАТЬ F = режим «заявка на закрытие»: клик по цене ставит reduce-only лимитку на весь объём позиции
     if(code==="ControlLeft"||code==="ControlRight"){ window.ctrlHeld=true; updateCloseMode(); return; }   // ЗАЖАТЬ Ctrl = тот же режим (индикатор внизу загорается)
     if(e.ctrlKey||e.metaKey||e.altKey) return;   // 🔴 КРИТ: НЕ выполнять торговые клавиши с Ctrl/Alt/Meta (Ctrl+Shift+R=перезагрузка дёргала R=реверс→открывала позу! Ctrl+A/S тоже)
@@ -312,9 +330,8 @@ function wireKeys(){
   document.addEventListener("keyup",(e)=>{ if(e.code==="KeyH") window.hHeld=false;
     if(e.code==="KeyF") window.fHeld=false;
     if(e.code==="ControlLeft"||e.code==="ControlRight") window.ctrlHeld=false;
-    if(e.code==="KeyL"){ window.rulerHeld=false; S._ruler=null; if(window.markDirty) markDirty(); }   // отпустил L — убрать линейку
-    updateCloseMode(); });
-  window.addEventListener("blur",()=>{ window.fHeld=false; window.ctrlHeld=false; window.hHeld=false; updateCloseMode(); });   // отпустил фокус (alt-tab) — сбросить режимы
+    updateCloseMode(); });   // L теперь переключатель (не hold) — по отпусканию ничего не делаем
+  window.addEventListener("blur",()=>{ window.fHeld=false; window.ctrlHeld=false; window.hHeld=false; updateCloseMode(); });   // отпустил фокус (alt-tab) — сбросить hold-режимы (линейка L — переключатель, её не трогаем)
 }
 
 function wireTrade(){
