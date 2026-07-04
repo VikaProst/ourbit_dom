@@ -14,6 +14,9 @@ echo Proveryayu biblioteki...
 echo Proveryayu obnovleniya...
 %PY% -u updater.py
 echo.
+echo Ostanavlivayu staryy server (chtoby zagruzilas svezhaya versiya)...
+for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":8777" ^| findstr "LISTENING"') do taskkill /F /PID %%p >nul 2>nul
+echo.
 echo Terminal: http://localhost:8777  -  ne zakryvay eto okno
 start "" http://localhost:8777
 %PY% -u server.py

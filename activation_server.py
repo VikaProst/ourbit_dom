@@ -1,17 +1,21 @@
-"""Сервер активации «1 ключ = 1 IP» (на премиум-сервере Вики, всегда включён).
+"""Сервер входа по логину+паролю (на премиум-сервере Вики, всегда включён).
 
-Ключи хранятся ПРЯМО ЗДЕСЬ (act_keys.json) и добавляются мгновенно через админ-API
-(make_key.py у Вики). Никакого GitHub-кэша. IP-привязка: ключ намертво к первому IP.
+Пользователи (логин→хеш пароля) хранятся ПРЯМО ЗДЕСЬ (users.json) и добавляются
+мгновенно через админ-API (make_user.py у Вики). Вика выдаёт каждому свой логин+пароль
+и может отозвать доступ в любой момент. Пароли хранятся ТОЛЬКО как sha256-хеш.
 
 Файлы рядом со скриптом:
   admin_secret.txt  — секрет для админ-API (задаётся при деплое, НЕ публикуется)
-  act_keys.json     — {"allowed":[sha256...]}  (растёт через админ-API)
-  bindings.json     — {sha256: ip}
+  users.json        — {"users": {"логин": "sha256(пароль)"}}  (растёт через админ-API)
+  act_keys.json     — СТАРАЯ система ключей (оставлена для совместимости, терминал её больше не дёргает)
+  bindings.json     — СТАРАЯ IP-привязка ключей
 
 Эндпоинты:
-  GET  /health                         → статус
-  POST /activate  {key}                → проверка+привязка к IP (это дёргает терминал друга)
-  POST /admin {secret, action, hash}   → add | del | list  (это дёргает make_key.py у Вики)
+  GET  /health                              → статус
+  POST /login  {login, password}            → проверка логина+пароля (это дёргает терминал друга)
+  POST /admin {secret, action, ...}         → adduser | deluser | listusers  (это дёргает make_user.py у Вики)
+                                              (+ старые add|del|list по ключам — для совместимости)
+  POST /activate {key}                      → СТАРАЯ проверка ключа по IP (терминал больше не зовёт)
 
 Запуск: python3 -u activation_server.py   (порт 8790, держать через systemd)
 """
@@ -22,6 +26,7 @@ PORT = 8790
 HERE = os.path.dirname(os.path.abspath(__file__))
 KEYS_FILE = os.path.join(HERE, "act_keys.json")
 BIND_FILE = os.path.join(HERE, "bindings.json")
+USERS_FILE = os.path.join(HERE, "users.json")         # {"users": {"логин": "sha256(пароль)"}}
 SECRET_FILE = os.path.join(HERE, "admin_secret.txt")
 BUGS_FILE = os.path.join(HERE, "bug_reports.jsonl")   # багрепорты друзей (по строке JSON на отчёт, с картинками)
 # ХОЗЯЙСКИЕ КЛЮЧИ (Вика) — без ограничения по IP: пускают с ЛЮБОГО IP (все её машины). Только sha256-хеши (не сам ключ).
@@ -99,15 +104,18 @@ class H(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.startswith("/health"):
+            users = _load(USERS_FILE, {"users": {}}).get("users") or {}
             allowed = _load(KEYS_FILE, {"allowed": []}).get("allowed") or []
-            self._json({"ok": True, "keys": len(allowed), "bound": len(_load(BIND_FILE, {}))})
+            self._json({"ok": True, "users": len(users), "keys": len(allowed), "bound": len(_load(BIND_FILE, {}))})
         elif self.path.startswith("/bugs"):
             self._bugs_view()
         else:
             self._json({"ok": False}, 404)
 
     def do_POST(self):
-        if self.path.startswith("/activate"):
+        if self.path.startswith("/login"):
+            self._login()
+        elif self.path.startswith("/activate"):
             self._activate()
         elif self.path.startswith("/admin"):
             self._admin()
@@ -115,6 +123,20 @@ class H(BaseHTTPRequestHandler):
             self._bug()
         else:
             self._json({"ok": False}, 404)
+
+    def _login(self):
+        """Проверка логина+пароля друга. Пароль сверяем по sha256-хешу из users.json."""
+        b = self._body()
+        login = (b.get("login") or "").strip()
+        pw = b.get("password") or ""
+        if not login or not pw:
+            self._json({"ok": False, "reason": "нужны логин и пароль"}); return
+        users = _load(USERS_FILE, {"users": {}}).get("users") or {}
+        h = hashlib.sha256(pw.encode()).hexdigest()
+        if users.get(login) == h:
+            self._json({"ok": True, "login": login})
+        else:
+            self._json({"ok": False, "reason": "неверный логин или пароль"})
 
     def _bug(self):
         b = self._body()
@@ -202,6 +224,26 @@ class H(BaseHTTPRequestHandler):
             self._json({"ok": False, "reason": "неверный админ-секрет"}, 403); return
         act = b.get("action")
         with _LOCK:
+            # ── управление ПОЛЬЗОВАТЕЛЯМИ (логин+пароль) — новая система ──
+            if act in ("adduser", "deluser", "listusers"):
+                udata = _load(USERS_FILE, {"users": {}})
+                users = udata.get("users") or {}
+                if act == "listusers":
+                    self._json({"ok": True, "users": sorted(users.keys())}); return
+                login = (b.get("login") or "").strip()
+                if not login:
+                    self._json({"ok": False, "reason": "нет login"}); return
+                if act == "adduser":
+                    pw = b.get("password") or ""
+                    if not pw:
+                        self._json({"ok": False, "reason": "нет password"}); return
+                    users[login] = hashlib.sha256(pw.encode()).hexdigest()   # перезапись = смена пароля
+                    udata["users"] = users; _save(USERS_FILE, udata)
+                    self._json({"ok": True, "count": len(users)}); return
+                if act == "deluser":
+                    users.pop(login, None); udata["users"] = users; _save(USERS_FILE, udata)
+                    self._json({"ok": True, "count": len(users)}); return
+            # ── СТАРАЯ система по ключам (совместимость) ──
             data = _load(KEYS_FILE, {"allowed": []})
             allowed = data.get("allowed") or []
             if act == "list":
@@ -218,9 +260,9 @@ class H(BaseHTTPRequestHandler):
                 binds = _load(BIND_FILE, {}); binds.pop(h, None); _save(BIND_FILE, binds)   # снять и IP-привязку
                 self._json({"ok": True, "count": len(allowed)})
             else:
-                self._json({"ok": False, "reason": "action: add|del|list"})
+                self._json({"ok": False, "reason": "action: adduser|deluser|listusers (или старые add|del|list)"})
 
 
 if __name__ == "__main__":
-    print(f"Activation server :{PORT} — ключи в act_keys.json, админ через /admin")
+    print(f"Login server :{PORT} — пользователи в users.json, вход через /login, админ через /admin")
     ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()

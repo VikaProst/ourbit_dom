@@ -204,6 +204,73 @@ def _fetch_deals(symbol: str) -> list:
     return _get(f"{OURBIT_BASE}/contract/deals/{symbol}", timeout=8).json().get("data") or []
 
 
+# ─────────────────── MEXC как ИСТОЧНИК СТАКАНА (не только цены) ───────────────────
+# MEXC contract API идентичен Ourbit (Ourbit — форк MEXC): те же /contract/detail|depth|deals.
+# Отдаём стакан+ленту MEXC клиенту через /api/mexcdepth и /api/mexctrades (REST-поллинг, как WEEX).
+MEXC_BASE = "https://contract.mexc.com/api/v1"
+_MEXC_INSTR = {"ts": 0.0, "tick": {}, "csize": {}}
+_MEXC_INSTR_TTL = 3600
+try:
+    _MEXC_SESS = _http.Session(impersonate="chrome120")   # отдельная сессия — не конкурирует с фидами Ourbit
+except Exception:
+    _MEXC_SESS = _http.Session()
+
+
+def _mexc_instruments() -> None:
+    now = time.time()
+    if _MEXC_INSTR["tick"] and now - _MEXC_INSTR["ts"] < _MEXC_INSTR_TTL:
+        return
+    try:
+        rows = _MEXC_SESS.get(f"{MEXC_BASE}/contract/detail", timeout=12).json().get("data") or []
+    except Exception:
+        return
+    tick, csz = {}, {}
+    for r in rows:
+        sym = r.get("symbol")
+        if not sym:
+            continue
+        tick[sym] = r.get("priceUnit")
+        csz[sym] = r.get("contractSize")
+    if tick:
+        _MEXC_INSTR.update({"ts": now, "tick": tick, "csize": csz})
+
+
+def _mexc_tick(sym: str) -> float:
+    if not _MEXC_INSTR["tick"]:
+        _mexc_instruments()
+    try:
+        return float(_MEXC_INSTR["tick"].get(sym) or 0.0001)
+    except (TypeError, ValueError):
+        return 0.0001
+
+
+def _mexc_csize(sym: str) -> float:
+    if not _MEXC_INSTR["csize"]:
+        _mexc_instruments()
+    try:
+        return float(_MEXC_INSTR["csize"].get(sym) or 1)
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def _mexc_depth(sym: str) -> dict:
+    data = _MEXC_SESS.get(f"{MEXC_BASE}/contract/depth/{sym}", timeout=8).json().get("data") or {}
+    b, a = _clean_book(data.get("bids") or [], data.get("asks") or [])
+    return {"symbol": sym, "bids": b, "asks": a, "ts": data.get("timestamp") or int(time.time() * 1000)}
+
+
+def _mexc_deals(sym: str) -> list:
+    raw = _MEXC_SESS.get(f"{MEXC_BASE}/contract/deals/{sym}", timeout=8).json().get("data") or []
+    out = []
+    for d in (raw if isinstance(raw, list) else []):
+        try:
+            out.append({"id": None, "t": int(d.get("t")), "p": float(d.get("p")),
+                        "v": float(d.get("v")), "side": 1 if int(d.get("T", 1)) == 1 else 2})
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 # ─────────────────── Накопитель ленты сделок (flow) ───────────────────
 class FlowState:
     """Хранит недавние сделки символа и считает кластера/дельту/пузыри."""
@@ -298,6 +365,11 @@ def _want(sym):
 # ─── торговля (Этап 2): лёгкий подписанный клиент + защита ───
 from ob_client import ObClient, TYPE_MARKET
 _OB = ObClient()
+
+# ── MEXC ТОРГОВЛЯ (веб-подпись, форк Ourbit) — для автобота на MEXC ──
+from mexc_client import MexcClient
+_MEXCTR = MexcClient()
+_MEXC_TRADE = {"connected": False}
 
 # ── WEEX (2-й источник стакана; торговля позже через веб-uid) ──
 from weex_client import _WEEX, to_v3 as _wx_v3
@@ -511,54 +583,67 @@ def _async_cancel_plans(sym):
         pass
 
 
-# ── АКТИВАЦИЯ по ключу (1 ключ = 1 IP): проверка на сервере активации Вики ──
-_ACT = {"ok": False, "ts": 0.0}
+# ── ВХОД по логину+паролю: ЛОКАЛЬНАЯ проверка по файлу users.txt (без сервера, без API) ──
+# Логин закрывает ВЕСЬ терминал: без успешного входа бэкенд не отдаёт данные/торговлю.
+# Файл users.txt рядом со скриптом: по одной паре "логин:пароль" на строку (строки с # — комментарии).
+# Состояние держим на процесс (localhost, один пользователь): вошёл раз — работает до перезапуска.
+_AUTH = {"ok": False, "login": None}
 
 def _act_cfg(fname):
     try:
         for line in open(os.path.join(HERE, fname), encoding="utf-8").read().splitlines():
             line = line.strip()
-            if line and not line.startswith("#"):   # ПЕРВАЯ непустая строка без # (комментарий в файле не ломает чтение ключа)
+            if line and not line.startswith("#"):   # ПЕРВАЯ непустая строка без # (комментарий в файле не ломает чтение)
                 return line
         return ""
     except Exception:
         return ""
 
-def _activation_ok():
-    srv = _act_cfg("license_server.txt").rstrip("/")
-    if not srv:
-        # БАЗОВЫЙ режим (без сервера): проверка ключа по локальному keys.json (без привязки к IP)
-        try:
-            allowed = json.load(open(os.path.join(HERE, "keys.json"), encoding="utf-8")).get("allowed") or []
-        except Exception:
-            allowed = []
-        if not allowed:
-            return True, "активация не требуется"   # список ключей пуст → открыто (у хозяина/в dev)
-        key = _act_cfg("license.txt")
-        if not key:
-            return False, "нет ключа активации — впиши его в license.txt (попроси у Вики)"
-        import hashlib
-        if hashlib.sha256(key.encode()).hexdigest() in allowed:
-            return True, "ok"
-        return False, "ключ недействителен или отозван"
-    # СТРОГИЙ режим (1 ключ = 1 IP) через сервер активации
-    if _ACT["ok"] and time.time() - _ACT["ts"] < 6 * 3600:
-        return True, "ok"                          # успешный кэш 6ч — краткий простой сервера не блокирует
-    key = _act_cfg("license.txt")   # может быть пусто → сервер всё равно проверит по IP (админ-машины Вики проходят без ключа)
+def _load_users():
+    """Читает users.txt → {логин: пароль}. Пары 'логин:пароль' по строке. Никакой сети."""
+    out = {}
     try:
-        body = json.dumps({"key": key or ""}).encode()
-        req = urllib.request.Request(srv + "/activate", data=body,
-                                     headers={"Content-Type": "application/json", "User-Agent": "term"})
-        r = json.loads(urllib.request.urlopen(req, timeout=8).read().decode())
+        for line in open(os.path.join(HERE, "users.txt"), encoding="utf-8").read().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or ":" not in line:
+                continue
+            login, pw = line.split(":", 1)
+            login, pw = login.strip(), pw.strip()
+            if login and pw:
+                out[login] = pw
     except Exception:
-        return (True, "ok") if _ACT["ok"] else (False, "сервер активации недоступен, попробуй позже")
-    if r.get("ok"):
-        _ACT.update({"ok": True, "ts": time.time()})
-        return True, "ok"
-    return False, r.get("reason") or "ключ не принят"
+        pass
+    return out
+
+def _auth_required():
+    """Вход обязателен, если в users.txt есть хотя бы одна пара. Пусто/нет файла → терминал открыт."""
+    return bool(_load_users())
+
+def _do_login(login, password):
+    """Проверяет логин+пароль ЛОКАЛЬНО по users.txt. Успех → открывает терминал на этот процесс."""
+    users = _load_users()
+    if not users:
+        _AUTH.update({"ok": True, "login": (login or "dev")})   # нет users.txt → вход не требуется
+        return {"ok": True, "login": _AUTH["login"], "dev": True}
+    login = (login or "").strip()
+    if not login or not password:
+        return {"ok": False, "error": "впиши логин и пароль"}
+    if users.get(login) == password:
+        _AUTH.update({"ok": True, "login": login})
+        return {"ok": True, "login": login}
+    return {"ok": False, "error": "неверный логин или пароль"}
 
 
-def _trade_connect(token: str) -> dict:
+def _save_ourbit_token(token: str):
+    """Сохранить рабочий токен Ourbit локально — чтобы не вставлять заново каждый запуск (ourbit.txt, в .gitignore)."""
+    try:
+        with open(os.path.join(HERE, "ourbit.txt"), "w", encoding="utf-8") as f:
+            f.write((token or "").strip() + "\n")
+    except Exception:
+        pass
+
+
+def _trade_connect(token: str, save: bool = True) -> dict:
     _OB.set_token(token)
     try:
         avail, equity = _OB.balance()
@@ -575,8 +660,25 @@ def _trade_connect(token: str) -> dict:
         fee = {"samples": 0, "total_fee": 0, "zero_fee": False}
     _TRADE.update({"connected": True, "armed": False, "zero_fee": fee.get("zero_fee", False),
                    "balance": avail, "equity": equity, "fee": fee})
+    if save:
+        _save_ourbit_token(token)                            # запомнить рабочий токен для след. запуска
     threading.Thread(target=_OB.warm, daemon=True).start()   # прогреть торговое соединение сразу (минимальный пинг 1-го ордера)
     return {"ok": True, "balance": avail, "equity": equity, "fee": fee, "state": _trade_state()}
+
+
+def _autoconnect_ourbit():
+    """При старте: если есть сохранённый токен Ourbit — подключиться им (не вставлять заново). Токен мог истечь — тогда молча пропускаем."""
+    try:
+        with open(os.path.join(HERE, "ourbit.txt"), encoding="utf-8") as f:
+            tok = f.read().strip()
+    except Exception:
+        return
+    if tok:
+        try:
+            r = _trade_connect(tok, save=False)
+            print("[ourbit] авто-подключение сохранённым токеном:", "ok, баланс $%.2f" % r.get("balance", 0) if r.get("ok") else "токен истёк — вставь свежий в терминале")
+        except Exception:
+            pass
 
 
 def _conn_keepalive():
@@ -1146,6 +1248,224 @@ def _ex_poll(ex: str):
         time.sleep(2)
 
 
+# ─────────── MEXC «справедливая цена» (fairPrice) — отдельный кэш+поллер для панели MEXC↔DEX ───────────
+# _EX_HIST["mexc"] хранит только last (парсер отбрасывает fairPrice). Панель показывает справедливую
+# цену отдельной линией — поэтому качаем all-ticker MEXC ещё раз, сохраняя (last, fair) с историей.
+_MXFAIR = {"hist": collections.deque(maxlen=60), "lock": threading.Lock()}
+_MXFAIR_WANT = [0.0]      # время последнего запроса из панели (ленивый опрос — не жжём сеть, если панель закрыта)
+
+
+def _mxfair_want():
+    _MXFAIR_WANT[0] = time.time()
+
+
+def _mxfair_poll():
+    """Тикеры MEXC-контрактов → {sym: (last, fair)} с историей. Опрос только пока панель смотрит."""
+    url = "https://contract.mexc.com/api/v1/contract/ticker"
+    while True:
+        try:
+            if time.time() - _MXFAIR_WANT[0] > 45:
+                time.sleep(2); continue
+            arr = _get(url, timeout=10).json().get("data") or []
+            snap = {}
+            for t in arr:
+                s = (t.get("symbol") or "").upper()
+                if not s.endswith("_USDT"):
+                    continue
+                last = _ff(t.get("lastPrice"))
+                fair = _ff(t.get("fairPrice")) or _ff(t.get("indexPrice")) or last
+                if last:
+                    snap[s] = (last, fair)
+            with _MXFAIR["lock"]:
+                _MXFAIR["hist"].append((time.time(), snap))
+        except Exception:
+            pass
+        time.sleep(2)
+
+
+# ─────────── On-chain цена по контракту (Dexscreener, БЕСПЛАТНО без ключа) — фиолетовая DEX-линия [CA] ───────────
+# DexTools API платный; Dexscreener даёт ту же USD-цену с самого ликвидного пула. symbol→контракт кэшируем
+# в dex_map.json (+ ручной оверрайд). Опрашиваем только монеты, которые СЕЙЧАС смотрит панель (бережём лимит).
+_DEX = {"hist": collections.deque(maxlen=60), "lock": threading.Lock()}
+_DEX_MAP: dict = {}                              # base -> {chain,pair,addr,liq} | {"skip":True}
+_DEX_WANT: dict = {}                             # base -> ts последнего запроса из панели
+_DEX_MAP_FILE = os.path.join(HERE, "dex_map.json")
+
+
+def _dex_load_map():
+    global _DEX_MAP
+    try:
+        with open(_DEX_MAP_FILE, encoding="utf-8") as fh:
+            _DEX_MAP = json.load(fh) or {}
+    except Exception:
+        _DEX_MAP = {}
+
+
+def _dex_save_map():
+    try:
+        with open(_DEX_MAP_FILE, "w", encoding="utf-8") as fh:
+            json.dump(_DEX_MAP, fh, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _dex_want(base):
+    _DEX_WANT[base] = time.time()
+
+
+def _dex_resolve(base):
+    """Самый ликвидный пул тикера через Dexscreener search → кэш в _DEX_MAP."""
+    m = _DEX_MAP.get(base)
+    if m:                                        # уже знаем (адрес или skip) — не долбить
+        return m
+    try:
+        pairs = _get("https://api.dexscreener.com/latest/dex/search",
+                     params={"q": base}, timeout=10).json().get("pairs") or []
+        best = None; bestliq = 0.0
+        for p in pairs:
+            if ((p.get("baseToken") or {}).get("symbol") or "").upper() != base:
+                continue
+            liq = _ff((p.get("liquidity") or {}).get("usd"))
+            if liq > bestliq:
+                bestliq = liq; best = p
+        if best and bestliq > 0:
+            m = {"chain": best.get("chainId"), "pair": best.get("pairAddress"),
+                 "addr": (best.get("baseToken") or {}).get("address"), "liq": round(bestliq)}
+        else:
+            m = {"skip": True}
+        _DEX_MAP[base] = m; _dex_save_map()
+        return m
+    except Exception:
+        return {}
+
+
+def _dex_price(base):
+    m = _DEX_MAP.get(base)
+    if not m or m.get("skip") or not m.get("chain") or not m.get("pair"):
+        return 0.0
+    try:
+        js = _get(f"https://api.dexscreener.com/latest/dex/pairs/{m['chain']}/{m['pair']}", timeout=10).json()
+        pairs = js.get("pairs") or ([js.get("pair")] if js.get("pair") else [])
+        if pairs and pairs[0]:
+            return _ff(pairs[0].get("priceUsd"))
+    except Exception:
+        pass
+    return 0.0
+
+
+def _dex_poll():
+    """On-chain цены только для монет, что смотрит панель. Разнесено во времени — бережём лимит Dexscreener."""
+    while True:
+        try:
+            now = time.time()
+            bases = [b for b, t in list(_DEX_WANT.items()) if now - t <= 45]
+            if not bases:
+                time.sleep(2); continue
+            snap = dict(_DEX["hist"][-1][1]) if _DEX["hist"] else {}   # держим прошлые значения между опросами
+            for b in bases:
+                if b not in _DEX_MAP:
+                    _dex_resolve(b); time.sleep(0.4)
+                px = _dex_price(b)
+                if px:
+                    snap[b] = px
+                time.sleep(0.4)
+            with _DEX["lock"]:
+                _DEX["hist"].append((now, snap))
+        except Exception:
+            pass
+        time.sleep(2)
+
+
+def _grid_series(syms, exs, want_fair, want_dex=False):
+    """Серии цены монеты сразу по нескольким биржам (+справедливая MEXC, +on-chain DEX) для панели MEXC↔DEX.
+    Возвращает {sym: {"s": {ex: [[t,last]...]}, "m": {ex: {last,turn,rise}}}}."""
+    for e in exs:                                    # прогреть нужные фиды (ленивый опрос)
+        if e in _EX_ADAPTERS:
+            _ex_want(e)
+    if want_fair:
+        _mxfair_want()
+    dh = []
+    if want_dex:
+        with _DEX["lock"]:
+            dh = list(_DEX["hist"])
+    out = {}
+    for sym in syms:
+        s = {}; m = {}
+        base = sym[:-5] if sym.endswith("_USDT") else sym
+        for e in exs:
+            h = _EX_HIST.get(e)
+            if not h:
+                continue
+            with h["lock"]:
+                hist = list(h["hist"])
+            arr = [[round(t, 1), v[3]] for (t, snap) in hist
+                   for v in (snap.get(sym),) if v and v[3]]
+            if arr:
+                s[e] = arr
+                nv = hist[-1][1].get(sym)
+                if nv:
+                    m[e] = {"last": nv[3], "turn": round(nv[0]), "rise": round(nv[2] * 100, 2)}
+        if want_fair:
+            with _MXFAIR["lock"]:
+                fh = list(_MXFAIR["hist"])
+            fa = [[round(t, 1), v[1]] for (t, snap) in fh
+                  for v in (snap.get(sym),) if v]
+            fl = [[round(t, 1), v[0]] for (t, snap) in fh
+                  for v in (snap.get(sym),) if v]
+            if fa:
+                s["mexcfair"] = fa
+            if fl and "mexc" not in s:               # если mexc-фид не выбран — берём last из fair-поллера
+                s["mexc"] = fl
+        if want_dex:
+            _dex_want(base)                          # попросить поллер качать эту монету
+            da = [[round(t, 1), snap[base]] for (t, snap) in dh if snap.get(base)]
+            if da:
+                s["dex"] = da
+                m["dex"] = {"last": da[-1][1], "turn": (_DEX_MAP.get(base) or {}).get("liq", 0), "rise": 0.0}
+        out[sym] = {"s": s, "m": m}
+    return out
+
+
+def _gap_top(exs, n, minturn, maxgap=400.0):
+    """Топ монет по максимальному расхождению последней цены между биржами (авто-список для панели).
+    Фильтры от мусора: минимум ликвидности (minturn) и потолок гэпа maxgap% (гэп выше = коллизия тикеров/битая цена)."""
+    for e in exs:
+        if e in _EX_ADAPTERS:
+            _ex_want(e)
+    latest = {}                                      # ex -> {sym: (last, turn)}
+    for e in exs:
+        h = _EX_HIST.get(e)
+        if not h:
+            continue
+        with h["lock"]:
+            snap = h["hist"][-1][1] if h["hist"] else {}
+        latest[e] = {sym: (v[3], v[0], v[2]) for sym, v in snap.items() if v and v[3]}
+    syms = set()
+    for e in latest:
+        syms |= set(latest[e].keys())
+    rows = []
+    for sym in syms:
+        px = []; turn = 0.0; exset = []; rise = 0.0; hiturn = -1.0
+        for e in exs:
+            v = latest.get(e, {}).get(sym)
+            if v:
+                px.append(v[0]); exset.append(e)
+                if v[1] > hiturn:                    # 24ч-изменение берём с самой оборотистой биржи
+                    hiturn = v[1]; turn = v[1]; rise = v[2]
+        if len(px) < 2 or turn < minturn:
+            continue
+        mn, mx = min(px), max(px)
+        if mn <= 0:
+            continue
+        gap = (mx - mn) / mn * 100
+        if gap > maxgap:                             # абсурдный гэп = разные токены под одним тикером / битая цена
+            continue
+        rows.append({"symbol": sym, "gap": round(gap, 3), "turn": round(turn),
+                     "rise": round(rise * 100, 2), "ex": exset})
+    rows.sort(key=lambda r: r["gap"], reverse=True)
+    return rows[:n]
+
+
 _SCR_LAST = [0.0]        # время последнего запроса скринера (обход бирж нужен только когда скринер используется)
 
 
@@ -1488,6 +1808,7 @@ _STATIC = {"/app.js": "application/javascript; charset=utf-8",
            "/trade.js": "application/javascript; charset=utf-8",
            "/chart.js": "application/javascript; charset=utf-8",
            "/screener.js": "application/javascript; charset=utf-8",
+           "/mxdex.js": "application/javascript; charset=utf-8",
            "/tape.js": "application/javascript; charset=utf-8",
            "/watchlist.js": "application/javascript; charset=utf-8",
            "/finrez.js": "application/javascript; charset=utf-8",
@@ -1496,6 +1817,9 @@ _STATIC = {"/app.js": "application/javascript; charset=utf-8",
            "/theme.js": "application/javascript; charset=utf-8",
            "/tile.js": "application/javascript; charset=utf-8",
            "/bugreport.js": "application/javascript; charset=utf-8",
+           "/autobot.js": "application/javascript; charset=utf-8",
+           "/auth.js": "application/javascript; charset=utf-8",
+           "/exlogos.js": "application/javascript; charset=utf-8",
            "/style.css": "text/css; charset=utf-8"}
 
 
@@ -1583,11 +1907,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path)
         route, qs = u.path, parse_qs(u.query)
+        # ── ГЕЙТ ВХОДА: без успешного логина отдаём ТОЛЬКО страницу, статику и статус входа ──
+        if _auth_required() and not _AUTH["ok"] and route not in ("/", "/index.html", "/favicon.ico", "/api/authstatus") and route not in _STATIC:
+            self._json({"ok": False, "error": "нужен вход", "auth": False}, code=401); return
         try:
             if route in ("/", "/index.html"):
                 self._file("index.html", "text/html; charset=utf-8")
             elif route == "/favicon.ico":
                 self.send_response(204); self.send_header("Content-Length", "0"); self.end_headers()   # нет иконки — 204, без 404
+            elif route == "/api/authstatus":
+                self._json({"ok": True, "authed": _AUTH["ok"], "login": _AUTH["login"], "required": _auth_required()})
             elif route in _STATIC:
                 self._file(route.lstrip("/"), _STATIC[route])
             elif route == "/api/instruments":
@@ -1639,6 +1968,30 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"ok": True, "ticks": out})
                 except Exception as exc:
                     self._json({"ok": False, "error": str(exc)})
+            elif route == "/api/mexcdepth":           # стакан MEXC (REST-поллинг)
+                sym = (qs.get("symbol") or ["BTC_USDT"])[0]
+                try:
+                    self._json({"ok": True, "depth": _mexc_depth(sym),
+                                "tick": _mexc_tick(sym), "csize": _mexc_csize(sym), "src": "rest"})
+                except Exception as exc:
+                    self._json({"ok": False, "error": str(exc)})
+            elif route == "/api/mexctrades":          # лента сделок MEXC (REST-поллинг)
+                sym = (qs.get("symbol") or ["BTC_USDT"])[0]
+                try:
+                    self._json({"ok": True, "ticks": _mexc_deals(sym)})
+                except Exception as exc:
+                    self._json({"ok": False, "error": str(exc)})
+            elif route == "/api/mexcaccount":         # ПРИВАТНОЕ: позиции/ордера/баланс MEXC (для автобота-реала)
+                if not _MEXC_TRADE["connected"]:
+                    self._json({"ok": False, "error": "MEXC не подключён"}); return
+                sym = (qs.get("symbol") or [""])[0]
+                try:
+                    avail, equity = _MEXCTR.balance()
+                    self._json({"ok": True, "balance": avail, "equity": equity,
+                                "positions": _MEXCTR.positions(sym), "orders": _MEXCTR.open_orders(sym),
+                                "allpos": _MEXCTR.positions(None)})
+                except Exception as exc:
+                    self._json({"ok": False, "error": str(exc)})
             elif route == "/api/flow":
                 sym = (qs.get("symbol") or ["XAUT_USDT"])[0]
                 _ACTIVE["symbol"] = sym; _want(sym)
@@ -1647,6 +2000,28 @@ class Handler(BaseHTTPRequestHandler):
                 except (TypeError, ValueError):
                     fpmin = 3
                 self._json({"ok": True, "flow": _flow_for(sym).snapshot(_tick_of(sym), fpmin)})
+            elif route == "/api/gridseries":                     # серии цены монеты по многим биржам + справедливая MEXC (панель MEXC↔DEX)
+                syms = [s.strip().upper() for s in (qs.get("symbols") or [""])[0].split(",") if s.strip()][:24]
+                exs = [e.strip().lower() for e in (qs.get("ex") or ["mexc,binance,bybit"])[0].split(",") if e.strip()][:12]
+                want_fair = (qs.get("fair") or ["1"])[0] != "0"
+                want_dex = (qs.get("dex") or ["0"])[0] == "1"
+                self._json({"ok": True, "now": round(time.time(), 1),
+                            "series": _grid_series(syms, exs, want_fair, want_dex)})
+            elif route == "/api/gaptop":                         # авто-топ монет по максимальному расхождению цен между биржами
+                exs = [e.strip().lower() for e in (qs.get("ex") or ["mexc,binance,bybit,gate,bitget"])[0].split(",") if e.strip()][:12]
+                try:
+                    n = max(1, min(60, int((qs.get("n") or ["20"])[0])))
+                    minturn = float((qs.get("minturn") or ["50000"])[0])   # $ 24ч оборота — отсечь неликвид/мусор
+                    maxgap = float((qs.get("maxgap") or ["400"])[0])       # % — потолок гэпа (выше = коллизия тикеров)
+                except (TypeError, ValueError):
+                    n, minturn, maxgap = 20, 50000.0, 400.0
+                self._json({"ok": True, "rows": _gap_top(exs, n, minturn, maxgap)})
+            elif route == "/api/mxsyms":                         # список монет для поиска в ячейках панели MEXC↔DEX
+                with _EX_SYMS_LOCK:
+                    allsyms = set()
+                    for _sy in _EX_SYMS.values():
+                        allsyms |= _sy
+                self._json({"ok": True, "syms": sorted(s.replace("_USDT", "") for s in allsyms)[:6000]})
             elif route == "/api/screener":
                 try:
                     win = float((qs.get("win") or ["1"])[0])          # окно в МИНУТАХ (M1..M60)
@@ -1786,8 +2161,15 @@ class Handler(BaseHTTPRequestHandler):
         if not self._origin_ok() and not (ext and route == "/api/exttoken"):
             self._json({"ok": False, "error": "origin запрещён"}, code=403); return
         b = self._read_body()
+        # ── ГЕЙТ ВХОДА: без успешного логина принимаем только сам логин ──
+        if _auth_required() and not _AUTH["ok"] and route != "/api/login":
+            self._json({"ok": False, "error": "нужен вход", "auth": False}, code=401); return
         try:
-            if route == "/api/connect":
+            if route == "/api/login":
+                self._json(_do_login(b.get("login", ""), b.get("password", "")))
+            elif route == "/api/logout":
+                _AUTH.update({"ok": False, "login": None}); self._json({"ok": True})
+            elif route == "/api/connect":
                 self._json(_trade_connect(b.get("token", "")))
             elif route == "/api/exttoken":           # из Chrome-расширения: авто-подключение токеном с открытой страницы биржи
                 self._json(_trade_connect(b.get("token", "")))
@@ -1795,11 +2177,7 @@ class Handler(BaseHTTPRequestHandler):
                 on = bool(b.get("on"))
                 if on and not _TRADE["connected"]:
                     self._json({"ok": False, "error": "сначала подключись токеном"}); return
-                if on:
-                    okA, whyA = _activation_ok()      # АКТИВАЦИЯ по ключу (1 ключ = 1 IP)
-                    if not okA:
-                        self._json({"ok": False, "error": "🔑 АКТИВАЦИЯ: " + whyA}); return
-                _TRADE["armed"] = on                  # торговля при ЛЮБОЙ комиссии (юзер: торгую везде)
+                _TRADE["armed"] = on                  # доступ уже под логином; торговля при ЛЮБОЙ комиссии (юзер: торгую везде)
                 if on:
                     threading.Thread(target=_OB.warm, daemon=True).start()   # прогреть соединение при включении LIVE — 1-й ордер сразу быстрый
                 self._json({"ok": True, "state": _trade_state()})
@@ -1983,6 +2361,73 @@ class Handler(BaseHTTPRequestHandler):
                 if not _TRADE["connected"]:
                     self._json({"ok": False, "error": "не подключено"}); return
                 self._json({"ok": True, "killed": _OB.cancel_all_plans(b.get("symbol", "XAUT_USDT"))})
+            elif route == "/api/mexcconnect":       # подключить MEXC: API ключ+секрет (HMAC) ИЛИ веб-токен. Валидируем чтением баланса.
+                key = (b.get("key") or "").strip(); sec = (b.get("secret") or "").strip(); tok = (b.get("token") or "").strip()
+                if key and sec:
+                    _MEXCTR.set_creds(key, sec)
+                elif tok:
+                    _MEXCTR.set_token(tok)
+                else:
+                    self._json({"ok": False, "error": "нужен API ключ+секрет или Web UID"}); return
+                try:
+                    avail, equity = _MEXCTR.balance()
+                    _MEXC_TRADE["connected"] = True
+                    threading.Thread(target=_MEXCTR.warm, daemon=True).start()
+                    self._json({"ok": True, "balance": avail, "equity": equity, "mode": _MEXCTR.mode()})
+                except Exception as exc:
+                    _MEXC_TRADE["connected"] = False
+                    self._json({"ok": False, "error": "MEXC не принял ключ: " + str(exc)})
+            elif route == "/api/mexcorder":         # РЕАЛЬНЫЙ ордер MEXC (автобот). Согласие = подключён MEXC + бот в режиме РЕАЛ.
+                if not _MEXC_TRADE["connected"]:
+                    self._json({"ok": False, "error": "MEXC не подключён (вставь Web UID)"}); return
+                try:
+                    side = int(b.get("side")); otype = int(b.get("otype", 1)); vol = int(b.get("vol") or 0)
+                    sym = b.get("symbol", "")
+                    if vol <= 0 or vol > _MAX_VOL:
+                        self._json({"ok": False, "error": f"vol вне лимита (1..{_MAX_VOL})"}); return
+                    close_pid = None
+                    if side in (2, 4):                # закрытие — нужен positionId (иначе откроет противоположную)
+                        try: close_pid = int(b.get("positionId") or 0) or None
+                        except (TypeError, ValueError): close_pid = None
+                        if close_pid is None:
+                            want_long = (side == 4)
+                            try: poslist = _MEXCTR.positions(sym)
+                            except Exception: poslist = []
+                            match = next((p for p in poslist if (p.get("side") == 1) == want_long and p.get("id")), None)
+                            if not match:
+                                self._json({"ok": False, "error": "закрывать нечего: позиция не найдена"}); return
+                            close_pid = match["id"]
+                            if match.get("vol"): vol = min(vol, int(match["vol"]))
+                    _t0 = time.time()
+                    sc, resp = _MEXCTR.create(sym, side, otype, vol, b.get("price", 0), int(b.get("leverage", 20)), position_id=close_pid)
+                    self._json({"ok": bool(resp.get("success")), "http": sc, "resp": resp,
+                                "srv_ms": round((time.time() - _t0) * 1000)})
+                except Exception as exc:
+                    try: pos = _MEXCTR.positions(b.get("symbol", ""))
+                    except Exception: pos = []
+                    self._json({"ok": False, "maybe_filled": True, "error": "СЕТЬ/ТАЙМАУТ: ордер мог исполниться", "positions": pos})
+            elif route == "/api/mexccancel":
+                if not _MEXC_TRADE["connected"]:
+                    self._json({"ok": False, "error": "MEXC не подключён"}); return
+                try:
+                    sc, resp = _MEXCTR.cancel(b.get("id"))
+                    self._json({"ok": bool(resp.get("success")), "resp": resp})
+                except Exception as exc:
+                    self._json({"ok": False, "error": str(exc)})
+            elif route == "/api/mexccancelall":
+                if not _MEXC_TRADE["connected"]:
+                    self._json({"ok": False, "error": "MEXC не подключён"}); return
+                sym = b.get("symbol", "")
+                ids = b.get("ids") or []
+                try:
+                    if ids:
+                        sc, resp = _MEXCTR.cancel_batch(ids)
+                        killed = len(ids) if resp.get("success") else 0; failed = []
+                    else:
+                        killed, failed = _MEXCTR.cancel_all(sym)
+                    self._json({"ok": True, "killed": killed, "failed": failed})
+                except Exception as exc:
+                    self._json({"ok": False, "error": str(exc)})
             elif route == "/api/autostop":          # тумблер: ставить ли биржевой SL/TP автоматически
                 _TRADE["auto_stop"] = bool(b.get("on"))
                 self._json({"ok": True, "auto_stop": _TRADE["auto_stop"]})
@@ -1993,14 +2438,7 @@ class Handler(BaseHTTPRequestHandler):
                 imgs = [i for i in imgs if isinstance(i, str) and i.startswith("data:image")][:4]
                 if not text and not imgs:
                     self._json({"ok": False, "error": "пустой отчёт"}); return
-                who = ""                             # короткий id отправителя (Вика видит КТО прислал; сам ключ не раскрываем)
-                try:
-                    _k = _act_cfg("license.txt")
-                    if _k:
-                        import hashlib as _h
-                        who = _h.sha256(_k.encode()).hexdigest()[:8]
-                except Exception:
-                    pass
+                who = (_AUTH.get("login") or "")[:16]   # Вика видит КТО прислал баг — по логину вошедшего
                 report = {"text": text[:4000], "images": imgs,
                           "symbol": (b.get("symbol") or "")[:40], "version": (b.get("version") or "")[:20],
                           "ua": (b.get("ua") or "")[:300], "who": who,
@@ -2057,6 +2495,10 @@ def main():
     for _ex in _EX_ADAPTERS:
         threading.Thread(target=_ex_poll, args=(_ex,), daemon=True, name="scr-" + _ex).start()
     threading.Thread(target=_membership_sweep, daemon=True, name="ex-membership").start()
+    threading.Thread(target=_mxfair_poll, daemon=True, name="mxfair").start()
+    _dex_load_map()
+    threading.Thread(target=_dex_poll, daemon=True, name="dex-onchain").start()
+    threading.Thread(target=_autoconnect_ourbit, daemon=True, name="ourbit-autoconnect").start()   # подхватить сохранённый токен Ourbit
     threading.Thread(target=_fee_watchdog, daemon=True, name="fee-watchdog").start()
     threading.Thread(target=_conn_keepalive, daemon=True, name="conn-keepalive").start()
     threading.Thread(target=_deal_counter_ws, daemon=True, name="deals-ws").start()

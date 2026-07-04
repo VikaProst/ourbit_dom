@@ -9,7 +9,7 @@ import os, json, hashlib, urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 # файлы, которые НЕ трогаем при обновлении (личные настройки/данные друга)
 SKIP = {"update_url.txt", "proxies.json", "manifest.json", "srv.out.log", "srv.err.log",
-        "start.bat", "license.txt"}   # start.bat НЕ трогаем (запускается сам себя — перезапись рвёт кодировку); license.txt личный
+        "start.bat", "license.txt", "users.txt", "ourbit.txt", "weex.txt"}   # start.bat НЕ трогаем (перезапись рвёт кодировку); license.txt/users.txt/ourbit.txt/weex.txt — личные (ключи/пароли)
 
 
 def _url():

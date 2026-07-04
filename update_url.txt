@@ -1,1 +1,2 @@
-https://raw.githubusercontent.com/VikaProst/ourbit_dom/main
+# автообновление ВЫКЛЮЧЕНО на машине-владельца (Вика публикует сама, ей тянуть с GitHub не нужно)
+# было: https://raw.githubusercontent.com/VikaProst/ourbit_dom/main

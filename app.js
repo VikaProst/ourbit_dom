@@ -150,7 +150,8 @@ function switchSymbol(full){
   S.flow={footprint:[],ticks:[],delta:[],now:0}; POOL=[];
   if(S._pv) S._pv.clear(); if(S._flash) S._flash.clear();   // сброс детекта проедания
   S._render=true;
-  if(typeof connectStream==="function") connectStream();
+  if(S.exMexc){ if(typeof mexcResetFlow==="function") mexcResetFlow(); if(typeof mexcPoll==="function"){ mexcPoll(); mexcPollTrades(); } }   // на MEXC — перечитать стакан/ленту MEXC, НЕ дёргать поток Ourbit
+  else if(typeof connectStream==="function") connectStream();
   if(window.linkOn && window.setChartSym) setChartSym(full);   // ЛИНК: график следует за стаканом
   S.markPrice=0; if(typeof renderTabs==="function") renderTabs();
 }
@@ -193,13 +194,22 @@ function buildStepOptions(){
   S.step=S.stepMult*S.tick; updateStepBtn();
 }
 // ── ИСТОЧНИК СТАКАНА: Ourbit (SSE) ↔ WEEX (опрос /api/weexdepth) ──
-const EX_DOM = { ourbit:"ourbit.com", weex:"weex.com" };
-const EX_LBL = { ourbit:"Ourbit", weex:"WEEX" };
-function exBadge(ex){ const d=EX_DOM[ex]||""; return '<img src="https://icons.duckduckgo.com/ip3/'+d+'.ico" style="width:13px;height:13px;vertical-align:-2px;border-radius:2px;margin-right:3px" onerror="this.style.display=\'none\'">'+EX_LBL[ex]; }
+const EX_DOM = { ourbit:"ourbit.com", weex:"weex.com", mexc:"mexc.com" };
+const EX_LBL = { ourbit:"Ourbit", weex:"WEEX", mexc:"MEXC" };
+// ЛОГОТИП биржи: сначала ВСТРОЕННЫЙ (exlogos.js, работает офлайн), иначе внешний favicon, при ошибке — брендовый значок.
+const EX_ICO2 = { ourbit:["#2f6bff","O"], weex:["#f5a623","W"], mexc:["#16b57f","M"] };
+function exBadgeSVG(ex,sz){ const m=EX_ICO2[ex]||["#5a6472","?"]; sz=sz||14;
+  return '<svg width="'+sz+'" height="'+sz+'" viewBox="0 0 14 14" style="vertical-align:-2px;flex:none"><rect width="14" height="14" rx="4" fill="'+m[0]+'"/><text x="7" y="10.3" text-anchor="middle" font-size="9" font-weight="700" fill="#fff" font-family="Arial,Helvetica,sans-serif">'+m[1]+'</text></svg>'; }
+window._exFav = function(img){ img.outerHTML=exBadgeSVG(img.getAttribute("data-ex")||"", parseInt(img.getAttribute("width"))||14); };
+function exLogoImg(ex,sz){ sz=sz||14; const emb=(window.EX_LOGO_DATA||{})[ex];
+  const src=emb||("https://icons.duckduckgo.com/ip3/"+(EX_DOM[ex]||"")+".ico");
+  return '<img data-ex="'+ex+'" src="'+src+'" width="'+sz+'" height="'+sz+'" style="vertical-align:-2px;border-radius:3px;flex:none" onerror="_exFav(this)">'; }
+function exBadge(ex){ return exLogoImg(ex,14)+'<span style="margin-left:4px">'+EX_LBL[ex]+'</span>'; }
 function setExBadge(ex){ const b=$("exbtn"); if(!b) return; b.innerHTML=exBadge(ex);
-  const w=ex==="weex"; b.style.background=w?"#3a2a12":"#233152"; b.style.color=w?"#ffcf7a":"#9fc0ff"; b.style.borderColor=w?"#5a3a12":"#2c3444"; }
-function ssExBadge(ex){ const d=EX_DOM[ex], c=ex==="weex"?"#e6a943":"#16c784";
-  return '<span class="ss-ex" data-ex="'+ex+'" title="открыть на '+EX_LBL[ex]+'" style="display:inline-flex;align-items:center;gap:2px;margin-left:5px;padding:1px 5px;border-radius:5px;background:'+c+'22;border:1px solid '+c+'55;font-size:10px;font-weight:700;color:'+c+'"><img src="https://icons.duckduckgo.com/ip3/'+d+'.ico" style="width:11px;height:11px;border-radius:2px" onerror="this.style.display=\'none\'">'+EX_LBL[ex]+'</span>'; }
+  const C={weex:["#3a2a12","#ffcf7a","#5a3a12"], mexc:["#122f3a","#5fd6e6","#164a5a"], ourbit:["#233152","#9fc0ff","#2c3444"]};
+  const c=C[ex]||C.ourbit; b.style.background=c[0]; b.style.color=c[1]; b.style.borderColor=c[2]; }
+function ssExBadge(ex){ const c=ex==="weex"?"#e6a943":ex==="mexc"?"#16c79a":"#3a6bd6";
+  return '<span class="ss-ex" data-ex="'+ex+'" title="открыть на '+EX_LBL[ex]+'" style="display:inline-flex;align-items:center;gap:3px;margin-left:5px;padding:1px 5px;border-radius:5px;background:'+c+'22;border:1px solid '+c+'55;font-size:10px;font-weight:700;color:'+c+'">'+exLogoImg(ex,11)+EX_LBL[ex]+'</span>'; }
 S._weexSet=null;   // Set монет, которые есть на WEEX (для ярлыков в поиске)
 function loadWeexSyms(){ fetch("/api/weexsyms").then(x=>x.json()).then(r=>{ if(r&&r.ok&&r.syms) S._weexSet=new Set(r.syms.map(s=>s.toUpperCase())); }).catch(()=>{}); }
 function weexApplyTick(tick){ const t=parseFloat(tick); if(t>0){ S.tick=t; S.dec=decimalsOf(t); } S.contractSize=1; buildStepOptions(); }
@@ -228,7 +238,7 @@ function _weexStop(){ if(S._weexTimer){ clearInterval(S._weexTimer); S._weexTime
 function weexResetFlow(){ S.flow={footprint:[],ticks:[],delta:[],now:0}; S._weexSeen=new Set(); }
 function setWeexMode(on){
   S.exWeex=!!on;
-  if(on){ if(_es){ try{_es.close();}catch(e){} } S.depth=null; S.centerS=null; weexResetFlow();   // своя лента WEEX
+  if(on){ if(S.exMexc){ if(typeof _mexcStop==="function") _mexcStop(); S.exMexc=false; } if(_es){ try{_es.close();}catch(e){} } S.depth=null; S.centerS=null; weexResetFlow();   // своя лента WEEX
     _weexStart(); setExBadge("weex"); }
   else { _weexStop(); S.depth=null; S.centerS=null; weexResetFlow();
     applySymbolMeta(); if(typeof connectStream==="function") connectStream();
@@ -236,6 +246,42 @@ function setWeexMode(on){
     setExBadge("ourbit"); }
 }
 window.setWeexMode=setWeexMode;
+
+// ─────────── MEXC как источник стакана (REST-поллинг, зеркало WEEX; формат MEXC = Ourbit) ───────────
+function mexcApplyTick(tick, csize){ const t=parseFloat(tick); if(t>0){ S.tick=t; S.dec=decimalsOf(t); } const c=parseFloat(csize); S.contractSize=(c>0?c:1); buildStepOptions(); }
+async function mexcPoll(){
+  if(!S.exMexc) return;
+  try{ const r=await fetch("/api/mexcdepth?symbol="+encodeURIComponent(S.symbol)).then(x=>x.json());
+    if(r&&r.ok&&r.depth&&r.depth.bids&&r.depth.bids.length){ if(r.tick) mexcApplyTick(r.tick, r.csize); S.depth=r.depth; S._render=true; status("live","MEXC"); }
+    else status("err","нет на MEXC"); }catch(e){}
+}
+async function mexcPollTrades(){   // лента сделок MEXC → принты в стакане/ленте (их читает и автобот)
+  if(!S.exMexc) return;
+  try{ const r=await fetch("/api/mexctrades?symbol="+encodeURIComponent(S.symbol)).then(x=>x.json());
+    if(r&&r.ok&&r.ticks&&r.ticks.length){
+      if(!S._mexcSeen) S._mexcSeen=new Set();
+      const fresh=[];
+      for(const tk of r.ticks){ const id=(tk.id!=null?tk.id:(tk.t+"_"+tk.p+"_"+tk.v)); if(!S._mexcSeen.has(id)){ S._mexcSeen.add(id); fresh.push({t:tk.t,p:tk.p,v:tk.v,side:tk.side}); } }
+      if(fresh.length){ fresh.sort((a,b)=>a.t-b.t);
+        S.flow.ticks=(S.flow.ticks||[]).concat(fresh).slice(-3000);
+        S.flow.now=Math.max(S.flow.now||0, fresh[fresh.length-1].t);
+        if(window.tapeFeed) tapeFeed(fresh); S._render=true; }
+      if(S._mexcSeen.size>6000) S._mexcSeen=new Set();
+    } }catch(e){}
+}
+function _mexcStart(){ if(!S._mexcTimer) S._mexcTimer=setInterval(mexcPoll,350); if(!S._mexcTradesTimer) S._mexcTradesTimer=setInterval(mexcPollTrades,350); mexcPoll(); mexcPollTrades(); }
+function _mexcStop(){ if(S._mexcTimer){ clearInterval(S._mexcTimer); S._mexcTimer=null; } if(S._mexcTradesTimer){ clearInterval(S._mexcTradesTimer); S._mexcTradesTimer=null; } }
+function mexcResetFlow(){ S.flow={footprint:[],ticks:[],delta:[],now:0}; S._mexcSeen=new Set(); }
+function setMexcMode(on){
+  S.exMexc=!!on;
+  if(on){ if(S.exWeex){ _weexStop(); S.exWeex=false; } if(_es){ try{_es.close();}catch(e){} } S.depth=null; S.centerS=null; mexcResetFlow();
+    _mexcStart(); setExBadge("mexc"); }
+  else { _mexcStop(); S.depth=null; S.centerS=null; mexcResetFlow();
+    applySymbolMeta(); if(typeof connectStream==="function") connectStream();
+    fetch("/api/depth?symbol="+encodeURIComponent(S.symbol)).then(x=>x.json()).then(d=>{ if(d&&d.ok&&d.depth){ S.depth=d.depth; S._render=true; } }).catch(()=>{});
+    setExBadge("ourbit"); }
+}
+window.setMexcMode=setMexcMode;
 // окошко выбора биржи для текущей монеты (как ярлыки в поиске), открывается кликом по значку в шапке
 function openExPicker(){
   const old=$("expick"); if(old){ old.remove(); return; }              // повторный клик — закрыть
@@ -245,13 +291,17 @@ function openExPicker(){
   const box=document.createElement("div"); box.id="expick";
   box.style.cssText="position:fixed;z-index:99999;background:#181c24;border:1px solid #2c3444;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.5);padding:4px;min-width:130px";
   const r=b.getBoundingClientRect(); box.style.left=Math.round(r.left)+"px"; box.style.top=Math.round(r.bottom+5)+"px";
-  const mk=(ex,avail)=>{ const it=document.createElement("div"); const cur=(ex==="weex")===S.exWeex;
+  const mk=(ex,avail)=>{ const it=document.createElement("div");
+    const cur = ex==="weex" ? S.exWeex : ex==="mexc" ? S.exMexc : (!S.exWeex && !S.exMexc);
     it.style.cssText="display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:6px;font-size:12px;font-weight:700;cursor:"+(avail?"pointer":"default")+";color:"+(avail?(cur?"#ffcf7a":"#dfe5ee"):"#5a6472")+";opacity:"+(avail?"1":".45")+";background:"+(cur&&avail?"#2a2f3a":"");
-    it.innerHTML='<img src="https://icons.duckduckgo.com/ip3/'+EX_DOM[ex]+'.ico" style="width:14px;height:14px;border-radius:2px" onerror="this.style.display=\'none\'">'+EX_LBL[ex]+(avail?(cur?" ✓":""):" — нет");
+    it.innerHTML=exLogoImg(ex,14)+EX_LBL[ex]+(avail?(cur?" ✓":""):" — нет");
     if(avail){ it.onmouseenter=()=>{ if(!cur) it.style.background="#232b39"; }; it.onmouseleave=()=>{ it.style.background=(cur?"#2a2f3a":""); };
-      it.onclick=()=>{ box.remove(); setWeexMode(ex==="weex"); }; }
+      it.onclick=()=>{ box.remove();
+        if(ex==="mexc") setMexcMode(true);
+        else if(ex==="weex") setWeexMode(true);
+        else { setWeexMode(false); setMexcMode(false); } }; }
     return it; };
-  box.appendChild(mk("ourbit", onOur)); box.appendChild(mk("weex", onWx));
+  box.appendChild(mk("ourbit", onOur)); box.appendChild(mk("weex", onWx)); box.appendChild(mk("mexc", true));
   document.body.appendChild(box);
   setTimeout(()=>{ const close=(e)=>{ if(!box.contains(e.target)&&e.target!==b){ box.remove(); document.removeEventListener("mousedown",close,true); } }; document.addEventListener("mousedown",close,true); },0);
 }
@@ -1101,7 +1151,35 @@ function wireSettings(){
     const fo=$("conn-fields-ourbit"), fw=$("conn-fields-weex");
     if(fo) fo.style.display = ex==="ourbit" ? "" : "none";
     if(fw) fw.style.display = ex==="weex" ? "" : "none"; }
-  { const ce=$("conn-ex"); if(ce) ce.addEventListener("change",applyConnEx); applyConnEx();
+  // Красивый выбор биржи с ЛОГОТИПАМИ вместо стандартного списка Windows (тот логотипы не умеет).
+  function buildConnExUI(){
+    const ce=$("conn-ex"); if(!ce||$("connExPill")) return;
+    ce.style.display="none";
+    const opts=Array.prototype.map.call(ce.options,o=>o.value);
+    const C={weex:["#3a2a12","#ffcf7a","#5a3a12"], ourbit:["#233152","#9fc0ff","#2c3444"], mexc:["#122f3a","#5fd6e6","#164a5a"]};
+    const pill=document.createElement("span"); pill.id="connExPill";
+    pill.style.cssText="display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:700;user-select:none";
+    ce.parentNode.insertBefore(pill, ce);
+    function paint(){ const ex=ce.value||"ourbit", c=C[ex]||C.ourbit;
+      pill.style.background=c[0]; pill.style.color=c[1]; pill.style.border="1px solid "+c[2];
+      pill.innerHTML=exLogoImg(ex,15)+'<span>'+(EX_LBL[ex]||ex)+'</span><span style="opacity:.65">▾</span>'; }
+    function choose(ex){ ce.value=ex; applyConnEx(); paint(); }
+    pill.onclick=(e)=>{ e.stopPropagation(); const old=$("connExMenu"); if(old){ old.remove(); return; }
+      const box=document.createElement("div"); box.id="connExMenu";
+      box.style.cssText="position:fixed;z-index:99999;background:#181c24;border:1px solid #2c3444;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.5);padding:4px;min-width:160px";
+      const r=pill.getBoundingClientRect(); box.style.left=Math.round(r.left)+"px"; box.style.top=Math.round(r.bottom+5)+"px";
+      opts.forEach(ex=>{ const it=document.createElement("div"), cur=ce.value===ex;
+        it.style.cssText="display:flex;align-items:center;gap:7px;padding:6px 9px;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer;color:"+(cur?"#ffcf7a":"#dfe5ee")+";background:"+(cur?"#2a2f3a":"");
+        it.innerHTML=exLogoImg(ex,15)+(EX_LBL[ex]||ex)+(cur?" ✓":"");
+        it.onmouseenter=()=>{ if(!cur) it.style.background="#232b39"; }; it.onmouseleave=()=>{ it.style.background=cur?"#2a2f3a":""; };
+        it.onclick=()=>{ box.remove(); choose(ex); };
+        box.appendChild(it); });
+      document.body.appendChild(box);
+      setTimeout(()=>{ const cl=(ev)=>{ if(!box.contains(ev.target)&&ev.target!==pill){ box.remove(); document.removeEventListener("mousedown",cl,true); } }; document.addEventListener("mousedown",cl,true); },0);
+    };
+    paint();
+  }
+  { const ce=$("conn-ex"); if(ce) ce.addEventListener("change",applyConnEx); applyConnEx(); buildConnExUI();
     const wb=$("conn-weex-btn"); if(wb) wb.onclick=async()=>{ const st=$("conn-weex-status");
       const key=(($("conn-weex-key")||{}).value||"").trim(), sec=(($("conn-weex-secret")||{}).value||"").trim(), pas=(($("conn-weex-pass")||{}).value||"").trim();
       if(!(key&&sec&&pas)){ if(st){st.textContent="заполни key, secret и passphrase"; st.style.color="#ef8f8a";} return; }

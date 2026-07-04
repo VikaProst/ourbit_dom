@@ -336,6 +336,27 @@ function wireKeys(){
   window.addEventListener("blur",()=>{ window.fHeld=false; window.ctrlHeld=false; window.hHeld=false; updateCloseMode(); });   // отпустил фокус (alt-tab) — сбросить hold-режимы (линейка L — переключатель, её не трогаем)
 }
 
+// подхватить УЖЕ подключённую биржу (сервер сам поднял сохранённый токен Ourbit) — чтобы не вставлять заново
+function reflectConnected(s){
+  if(!(s&&s.connected)) return false;
+  T.connected=true;
+  const fee=s.fee||{}, zero=fee.zero_fee;
+  const el=$$("acct"); if(el){ el.textContent=`баланс $${(s.balance||0).toFixed(2)} · fee ${zero?"0% ✓":"НЕ 0%"}`; el.className="acct ok"; }
+  const lb=$$("livebtn"); if(lb) lb.disabled=false;
+  refreshAccount();
+  return true;
+}
+function autoReflect(){
+  let tries=0;
+  const t=setInterval(async()=>{
+    tries++;
+    if(T.connected){ clearInterval(t); return; }
+    try{ const s=await fetch("/api/state").then(r=>r.json());
+      if(reflectConnected(s)){ log("Ourbit подключён автоматически (сохранённый токен)","ok"); clearInterval(t); } }catch(e){}
+    if(tries>12) clearInterval(t);         // ~18с попыток (сервер проверяет токен в фоне при старте)
+  }, 1500);
+}
+
 function wireTrade(){
   $$("connectbtn").onclick=connect;
   $$("token").addEventListener("keydown",(e)=>{ if(e.key==="Enter") connect(); });
@@ -346,5 +367,6 @@ function wireTrade(){
   wireMouse(); wireKeys();
   setInterval(refreshAccount, 1500);
   setInterval(checkRisk, 300);        // следим за SL/TP/безубытком быстрее, чем обновление аккаунта
+  autoReflect();                      // при загрузке — подхватить сохранённое подключение Ourbit
 }
 wireTrade();

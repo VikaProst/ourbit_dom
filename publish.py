@@ -10,9 +10,9 @@ import os, json, hashlib, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 INCLUDE = [
-    "app.js", "trade.js", "chart.js", "screener.js", "tape.js", "watchlist.js", "finrez.js",
-    "notifications.js", "theme.js", "tile.js", "dock.js", "bugreport.js", "index.html", "style.css",
-    "server.py", "ob_client.py", "weex_client.py", "proxy.py", "updater.py", "license_server.txt", "keys.json",
+    "app.js", "trade.js", "chart.js", "screener.js", "mxdex.js", "tape.js", "watchlist.js", "finrez.js",
+    "notifications.js", "theme.js", "tile.js", "dock.js", "bugreport.js", "autobot.js", "auth.js", "exlogos.js", "index.html", "style.css",
+    "server.py", "ob_client.py", "weex_client.py", "mexc_client.py", "proxy.py", "updater.py", "license_server.txt", "keys.json",
     "chrome-extension/manifest.json", "chrome-extension/popup.html", "chrome-extension/popup.js",
 ]
 
