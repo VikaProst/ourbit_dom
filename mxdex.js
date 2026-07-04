@@ -261,23 +261,18 @@
     const w = win(); if (!w || w.classList.contains("hidden")) return;
     const grid = g("mxgrid"); if (!grid) return;
     try { for (const cell of grid.children) { const idx = +cell.dataset.idx, sym = CFG.cards[idx]; if (sym) drawCell(cell, sym); } }
-    catch (e) { const s = g("mxstat"); if (s) { s.textContent = "v175 РИС.ОШИБКА: " + (e && e.message || e); s.style.color = "#ef5f5a"; } }
+    catch (e) { const s = g("mxstat"); if (s) { s.textContent = "v176 РИС.ОШИБКА: " + (e && e.message || e); s.style.color = "#ef5f5a"; } }
   }
 
   function drawCell(cell, sym) {
     const cv = cell.querySelector(".mxccanvas"); if (!cv) return;
     let W = cv.clientWidth, H = cv.clientHeight;
-    if (!H) { const p = cv.parentElement; H = (p ? p.clientHeight : 0) - 48; }   // запас: высота ячейки минус шапка/футер
-    if (!W) W = cv.parentElement ? cv.parentElement.clientWidth : 300;
     W = Math.max(60, W); H = Math.max(40, H);
     if (cv.width !== W || cv.height !== H) { cv.width = W; cv.height = H; }
     const x = cv.getContext("2d"); x.clearRect(0, 0, W, H);
-    x.fillStyle = "rgba(90,130,210,.12)"; x.fillRect(0, 0, W, H);   // ДИАГ: лёгкая заливка — видно, что канвас рисует
     const padR = 58, padL = 2, now = nowS(), tMin = now - CFG.windowSec, tMax = now;
     const lines = CFG.ex.filter((id) => { const b = BUF[sym + "::" + id]; return b && b.length; });
-    if (!lines.length) { x.fillStyle = "#7b8390"; x.font = "10px monospace";
-      const nb = Object.keys(BUF).filter((k) => k.indexOf(sym + "::") === 0).length;
-      x.fillText("сбор… буфер:" + nb + "  W" + W + " H" + H, 6, 16); return; }
+    if (!lines.length) { x.fillStyle = "#5b6573"; x.font = "11px monospace"; x.fillText("сбор данных…", 10, 20); return; }
     let hi = -Infinity, lo = Infinity;
     for (const id of lines) { const b = BUF[sym + "::" + id]; for (let i = b.length - 1; i >= 0; i--) { if (b[i][0] < tMin) break; if (b[i][1] > hi) hi = b[i][1]; if (b[i][1] < lo) lo = b[i][1]; } }
     if (!(hi > lo)) { const m = hi > 0 ? hi : 1; hi = m * 1.001; lo = m * 0.999; }
@@ -319,13 +314,13 @@
   // ── окно ──
   // подготовить контент панели (наполнить сетку/панели) — вызывается и при загрузке, и при открытии
   function ensure() {
-    const stv = g("mxstat"); if (stv) { stv.textContent = "v175"; stv.style.color = "#6b7280"; }
+    const stv = g("mxstat"); if (stv) { stv.textContent = "v176"; stv.style.color = "#6b7280"; }
     try {
       if (!CFG.cards || !CFG.cards.length) { CFG.cards = DEF.cards.slice(); save(); }
       renderBar(); renderZoom(); renderGrid(); loadSyms();
       const sb = g("mxsound"); if (sb) sb.classList.toggle("on", CFG.sound);
       const th = g("mxthresh"); if (th) th.value = CFG.thresh;
-    } catch (e) { if (stv) { stv.textContent = "v175 ОШИБКА: " + (e && e.message || e); stv.style.color = "#ef5f5a"; } }
+    } catch (e) { if (stv) { stv.textContent = "v176 ОШИБКА: " + (e && e.message || e); stv.style.color = "#ef5f5a"; } }
   }
   function open() {
     const w = win(); if (!w) return;

@@ -41,6 +41,7 @@
       minPrintUsd: 5,    // принты мельче ($) не двигают наш филл (реализм)
     },
     auto: true,          // 🎯 авто-подбор гейт/тейк/стоп/глубина под монету из живого стакана
+    twoSided: true,      // ⇅ ставить лимитки с ОБЕИХ сторон (у верхнего и нижнего маркетоса)
     paper: true,         // true=симуляция, false=РЕАЛ (реальные ордера через терминал, только Ourbit/WEEX)
     conn: { ex: "mexc", type: "api", key: "", secret: "", pass: "", uid: "" },
     // runtime
@@ -60,7 +61,7 @@
 
   // ── сохранение настроек ─────────────────────────────────────────────────
   function saveState() {
-    try { localStorage.setItem("ab_cfg", JSON.stringify(AB.cfg)); localStorage.setItem("ab_conn", JSON.stringify(AB.conn)); localStorage.setItem("ab_auto", AB.auto ? "1" : "0"); localStorage.setItem("ab_paper", AB.paper ? "1" : "0"); } catch (e) {}
+    try { localStorage.setItem("ab_cfg", JSON.stringify(AB.cfg)); localStorage.setItem("ab_conn", JSON.stringify(AB.conn)); localStorage.setItem("ab_auto", AB.auto ? "1" : "0"); localStorage.setItem("ab_paper", AB.paper ? "1" : "0"); localStorage.setItem("ab_two", AB.twoSided ? "1" : "0"); } catch (e) {}
   }
   function loadState() {
     try {
@@ -68,6 +69,7 @@
       const n = JSON.parse(localStorage.getItem("ab_conn") || "null"); if (n) Object.assign(AB.conn, n);
       const a = localStorage.getItem("ab_auto"); if (a != null) AB.auto = a === "1";
       const pp = localStorage.getItem("ab_paper"); if (pp != null) AB.paper = pp === "1";
+      const tw = localStorage.getItem("ab_two"); if (tw != null) AB.twoSided = tw === "1";
     } catch (e) {}
   }
 
@@ -210,6 +212,46 @@
     return { side, price, tpPrice: tp, wallPx: wall.price, wallVol: wall.vol, kind: `маркетос ${wall.offT}т $${Math.round(wall.usd)}` };
   }
 
+  // План для ОДНОЙ стороны — ближайший маркетос этой стороны (для двустороннего режима, БЕЗ тренд-фильтра).
+  function planSide(side) {
+    const t = tk(), C = AB.cfg;
+    const range = Math.max(C.deepTicks || 12, 90), minUsd = C.wallMinUsd > 0 ? C.wallMinUsd : 500;
+    const wall = nearestWall(side, range, minUsd);
+    if (!wall) return null;
+    const buy = side === "buy";
+    const price = buy ? snap(wall.price + C.aheadTicks * t) : snap(wall.price - C.aheadTicks * t);
+    const tp = buy ? snap(price + C.profitTicks * t) : snap(price - C.profitTicks * t);
+    return { side, price, tpPrice: tp, wallPx: wall.price, wallVol: wall.vol, offT: wall.offT, usd: wall.usd };
+  }
+
+  // ── PAPER двусторонний: держим лимитки с обеих сторон (qBuy/qSell), любой прострел ловим ──
+  function makePaperQuote(plan) {
+    const sn = now();
+    return { side: plan.side, price: plan.price, vol: vol(plan.price), tpPrice: plan.tpPrice,
+             wallPx: plan.wallPx, wallVol: plan.wallVol, offT: plan.offT,
+             since: sn, _seen: sn, placedAt: Date.now(), queue: queueAt(plan.side, plan.price), fillVol: 0 };
+  }
+  function fillFromQuote(q) {                                   // одна сторона залилась → позиция + тейк + СНЯТЬ ВСЕ заявки
+    const long = q.side === "buy", sn = now(), cside = long ? "sell" : "buy";
+    AB.pos = { long, price: q.price, vol: q.vol, t: sn, kind: "2стор" };
+    AB.close = { side: cside, price: q.tpPrice, since: sn, _seen: sn, queue: queueAt(cside, q.tpPrice), fillVol: 0 };
+    AB.qBuy = null; AB.qSell = null; AB.state = "inpos";
+    abLog(`✅ ЗАЛИЛО ${long ? "LONG" : "SHORT"} @${q.price.toFixed(dc())} — тейк @${q.tpPrice.toFixed(dc())} (лимитки сняты)`, "ok");
+  }
+  function manageSidePaper(side) {                              // поставить/держать/переставить одну сторону
+    const key = side === "buy" ? "qBuy" : "qSell", cur = AB[key];
+    const plan = planSide(side);
+    if (!plan) { if (cur) AB[key] = null; return; }             // маркетоса этой стороны нет → снять заявку
+    if (cur && wallAlive(cur)) return;                          // стена жива → держим (ждём прострел, НЕ спамим)
+    AB[key] = makePaperQuote(plan);
+    abLog(`[2стор ${side === "buy" ? "BUY" : "SELL"} маркетос ${plan.offT}т $${Math.round(plan.usd)}] @${plan.price.toFixed(dc())}`);
+  }
+  function twoSidedPaperStep(bb, ba, sprT) {
+    if (now() < AB.cooldownUntil) return;
+    for (const key of ["qBuy", "qSell"]) { const q = AB[key]; if (q && printFilled(q)) { fillFromQuote(q); return; } }   // залив → выходим
+    manageSidePaper("buy"); manageSidePaper("sell");
+  }
+
   // ── переходы состояний ────────────────────────────────────────────────────
   function placeEntry(plan) {
     const v = vol(plan.price), sn = now();
@@ -270,7 +312,8 @@
       if (AB.pos) abLog("⚠ позиция ОСТАЛАСЬ открыта — закрой вручную (D/Alt-клик)", "err");
       else abLog("снял заявки бота");
     }
-    AB.state = "idle"; AB.entry = null; AB.pos = null; AB.close = null; AB.cooldownUntil = 0;
+    AB.state = "idle"; AB.entry = null; AB.pos = null; AB.close = null;
+    AB.qBuy = null; AB.qSell = null; AB.rqBuy = null; AB.rqSell = null; AB.cooldownUntil = 0;
     if (!silent && AB.paper) abLog("сброс");
   }
   // Стена ММ: если Вика НЕ вписала вручную — тянем из стакана «Крупный объём USD»; вписала — не трогаем.
@@ -308,10 +351,53 @@
     if (AB.paper || !S.exMexc || !AB._mexcConn || !AB.on) return;
     try { const r = await fetch("/api/mexcaccount?symbol=" + encodeURIComponent(S.symbol)).then((x) => x.json()); if (r && r.ok) AB._mexcAcct = r; } catch (e) {}
   }
+  // управление открытой позицией MEXC (общее для одно- и двустороннего): тейк уже стоит, тут стоп/лимит/тайм.
+  function mexcManagePos(bb, ba) {
+    const C = AB.cfg, t = tk(), ms = Date.now(), pos = mexcPos();
+    if (!(pos && pos.vol > 0)) { AB.stats.trades++; abLog("💚 РЕАЛ MEXC позиция закрыта", "ok"); AB.pos = null; AB.close = null; AB.state = "idle"; AB._realCd = ms + C.cooldownSec * 1000; return; }
+    const usd = pos.vol * cs() * (AB.pos.long ? bb : ba);
+    if (usd > C.sizeUsd * 2) { abLog("🛑 MEXC позиция превысила лимит — аварийно закрываю, стоп бота", "err"); mexcCancelAllReal(); mexcCloseMarket(pos); AB.on = false; syncToggleBtn(); return; }
+    const adverse = AB.pos.long ? bb : ba, lossT = AB.pos.long ? (AB.pos.price - adverse) / t : (adverse - AB.pos.price) / t;
+    if (lossT >= C.stopTicks) { abLog(`РЕАЛ MEXC стоп ${C.stopTicks}т`, "err"); mexcCancelAllReal(); mexcCloseMarket(pos); }
+    else if (ms - AB.pos.t >= C.maxHoldSec * 1000) { mexcCancelAllReal(); mexcCloseMarket(pos); }
+  }
+  // MEXC двусторонний: держим реальные лимитки с обеих сторон; при заливе снимаем ОБЕ и ставим тейк.
+  function maintainRealMexcSide(side) {
+    if (AB._mexcBusy) return;
+    const key = side === "buy" ? "rqBuy" : "rqSell", cur = AB[key], plan = planSide(side);
+    if (!plan) { if (cur && cur.orderId) { AB._mexcBusy = true; abPost("/api/mexccancel", { id: cur.orderId }).then(() => { AB._mexcBusy = false; }); AB[key] = null; } return; }
+    if (cur && wallAlive({ side, wallPx: cur.wallPx, wallVol: cur.wallVol })) return;   // держим
+    const v = vol(plan.price), oside = side === "buy" ? RSIDE.OPEN_LONG : RSIDE.OPEN_SHORT;
+    AB._mexcBusy = true;
+    const place = () => mexcOrder(oside, ROT.LIMIT, plan.price, v, 0).then((r) => {
+      AB._mexcBusy = false;
+      if (r && r.ok) { const oid = r.resp && r.resp.data && (r.resp.data.orderId || r.resp.data); AB[key] = { price: plan.price, wallPx: plan.wallPx, wallVol: plan.wallVol, tp: plan.tpPrice, orderId: oid, placedAt: Date.now() }; abLog(`[РЕАЛ 2стор ${side === "buy" ? "BUY" : "SELL"} ${plan.offT}т] @${plan.price.toFixed(dc())}`); }
+      else abLog(`MEXC ${side} отклонён: ${(r && (r.error || (r.resp && r.resp.message))) || "?"}`, "err");
+    });
+    if (cur && cur.orderId) abPost("/api/mexccancel", { id: cur.orderId }).then(place); else place();
+  }
+  function realStepMexcTwo(bb, ba) {
+    const reason = realBlockReason(); if (reason) { AB._realReason = reason; return; }
+    AB._realReason = null;
+    const ms = Date.now(), pos = mexcPos();
+    if (AB.state === "inpos" && AB.pos) { mexcManagePos(bb, ba); return; }
+    if (pos && pos.vol > 0) {                                   // одну сторону залило → снять ОБЕ заявки, поставить тейк
+      const long = pos.side === 1, cside = long ? RSIDE.CLOSE_LONG : RSIDE.CLOSE_SHORT;
+      const q = long ? AB.rqBuy : AB.rqSell, tp = q ? q.tp : (long ? pos.avg * 1.001 : pos.avg * 0.999);
+      AB._mexcBusy = true; mexcCancelAllReal();
+      mexcOrder(cside, ROT.LIMIT, tp, pos.vol, pos.id).then(() => { AB._mexcBusy = false; });
+      AB.pos = { long, price: pos.avg, vol: pos.vol, t: ms, kind: "2стор" }; AB.close = { price: tp };
+      AB.rqBuy = null; AB.rqSell = null; AB.state = "inpos";
+      abLog(`✅ РЕАЛ MEXC залило ${long ? "LONG" : "SHORT"} @${pos.avg} — тейк @${tp.toFixed(dc())} (лимитки сняты)`, "ok");
+      return;
+    }
+    maintainRealMexcSide("buy"); maintainRealMexcSide("sell");
+  }
   function realStepMexc(bb, ba, sprT) {
     const reason = realBlockReason();
     if (reason) { AB._realReason = reason; return; }
     AB._realReason = null;
+    if (AB.twoSided) { realStepMexcTwo(bb, ba); return; }       // двусторонний режим
     const t = tk(), C = AB.cfg, ms = Date.now(), pos = mexcPos();
     if (AB.state === "idle") {
       if (ms < (AB._realCd || 0) || AB._mexcBusy) return;
@@ -408,8 +494,9 @@
       if (bb && ba && ba > bb) {
         const sprT = Math.round((ba - bb) / t);
         if (!AB.paper) { if (S.exMexc) realStepMexc(bb, ba, sprT); else realStep(bb, ba, sprT); }   // РЕАЛ (MEXC через веб-токен / Ourbit через терминал)
-        else if (AB.state === "quoting" && AB.entry) { if (printFilled(AB.entry)) onEntryFilled(); else maybeRequote(bb, ba, sprT); }
         else if (AB.state === "inpos" && AB.pos) { if (AB.close && printFilled(AB.close)) closeAt(AB.close.price, "тейк", false); else checkStop(bb, ba); }
+        else if (AB.twoSided) { twoSidedPaperStep(bb, ba, sprT); }                                  // PAPER двусторонний (лимитки с обеих сторон)
+        else if (AB.state === "quoting" && AB.entry) { if (printFilled(AB.entry)) onEntryFilled(); else maybeRequote(bb, ba, sprT); }
         else if (AB.state === "idle" && now() >= AB.cooldownUntil) { const plan = planEntry(bb, ba, sprT); if (plan) placeEntry(plan); }
       }
     }
@@ -504,6 +591,7 @@
       <div class="ab-row"><label>🧱 Стена ММ, $ <span class="ab-sub">задаёшь ты</span></label><input type="number" id="ab-wallusd" step="50"></div>
       <div class="ab-crow"><button id="ab-wallpull">↧ из стакана</button></div>
       <div class="ab-note" id="ab-wallinfo" style="color:#e6c34a">🧱 стена ММ: —</div>
+      <label class="ab-autochk"><input type="checkbox" id="ab-two"> ⇅ <b>Обе стороны</b> <span class="ab-sub">(лимитки сверху и снизу)</span></label>
       <label class="ab-autochk"><input type="checkbox" id="ab-auto"> 🎯 <b>Авто под монету</b> <span class="ab-sub">(гейт/тейк/стоп)</span></label>
       <div id="ab-autoline" class="ab-strat">—</div>
       <div class="ab-sec ab-cl" data-box="ab-manual">▸ Ручная настройка</div>
@@ -597,6 +685,8 @@
       else abLog("в стакане «Крупный объём USD» не задан порог", "err");
     };
 
+    const twoChk = w.querySelector("#ab-two");
+    if (twoChk) { twoChk.checked = AB.twoSided; twoChk.onchange = () => { AB.twoSided = twoChk.checked; if (AB.on) resetRuntime(true); saveState(); abLog(AB.twoSided ? "режим: ⇅ обе стороны" : "режим: одна нога"); }; }
     const autoChk = w.querySelector("#ab-auto");
     if (autoChk) { autoChk.checked = AB.auto; autoChk.onchange = () => { AB.auto = autoChk.checked; applyAutoUI(w); saveState(); if (AB.auto) autoTune(); }; }
     applyAutoUI(w);
@@ -732,6 +822,12 @@
       let html = `${modeTag} · <span class="st" style="color:${stCol}">${stTxt}</span> · спред ${sprT}т`;
       if (!AB.paper && AB.on && AB._realReason) html += `<br><span style="color:#ef938f">⚠ ${AB._realReason}</span>`;
       if (AB.entry) html += `<br>[${AB.entry.kind}] ${AB.entry.side === "buy" ? "BUY" : "SELL"} @${AB.entry.price.toFixed(dc())} → тейк @${AB.entry.tpPrice.toFixed(dc())}`;
+      if (AB.twoSided && !AB.pos) {                              // двусторонний: показать обе стоящие лимитки
+        const qb = AB.paper ? AB.qBuy : AB.rqBuy, qs = AB.paper ? AB.qSell : AB.rqSell;
+        if (qb) html += `<br><span style="color:#6fcf91">↑ BUY @${(qb.price).toFixed(dc())}</span>`;
+        if (qs) html += `<br><span style="color:#ef938f">↓ SELL @${(qs.price).toFixed(dc())}</span>`;
+        if (!qb && !qs && AB.on) html += `<br><span style="color:#7a8697">жду маркетос ≥ $${Math.round(AB.cfg.wallMinUsd || 0)}…</span>`;
+      }
       if (AB.pos) {
         const px = AB.pos.long ? bb : ba;
         const up = px ? pnlUsd(AB.pos.long, AB.pos.price, px, AB.pos.vol) : 0;

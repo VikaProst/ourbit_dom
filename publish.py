@@ -21,7 +21,8 @@ for rel in INCLUDE:
     p = os.path.join(HERE, rel.replace("/", os.sep))
     if os.path.exists(p):
         with open(p, "rb") as fh:
-            files[rel] = hashlib.sha256(fh.read()).hexdigest()
+            data = fh.read().replace(b"\r\n", b"\n")   # LF-нормализация: git хранит/GitHub отдаёт LF → хеш считаем по LF, иначе updater у друга «не совпал хеш» и пропускает файл
+            files[rel] = hashlib.sha256(data).hexdigest()
 
 man = {"version": time.strftime("%Y%m%d-%H%M"), "files": files}
 with open(os.path.join(HERE, "manifest.json"), "w", encoding="utf-8") as fh:
