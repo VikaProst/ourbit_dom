@@ -40,12 +40,12 @@
   const DEF = { ex: ["mexc", "binance", "bybit", "asterdex", "mexcfair"], sound: true,
     cards: ["VANRY_USDT", "GWEI_USDT", "OPENAI_USDT", "ANTHROPIC_USDT"],
     windowSec: 120, thresh: 2.5, pinned: [], minturn: 20000, maxgap: 600,
-    cols: 3, cellH: 210, lw: 1.7, feedW: 198 };
+    cols: 3, cellH: 210, lw: 1.2, feedW: 198 };
 
   let CFG = load();
   const BUF = {};                    // "sym::ex" -> [[t,price]] клиентский буфер (плавная живая линия)
-  let FEED = [];                     // спред-коллы (новейшие первыми)
-  const SEEN = {};                   // sym -> последний пробитый порог
+  const ACTIVE = {};                 // sym -> {sym,gap,rise,ex,bucket,t} живой список монет со спредом ≥ порога
+  let SYMS = [];                     // список монет для поиска в ячейках
   const PINDATA = {};                // sym -> {gap,rise}
   let META = {};                     // sym -> {ex:{last,turn,rise}} свежие цены
   let timer = null, raf = null, firstScan = true;
@@ -103,7 +103,7 @@
   function buildCols() { const c = g("mxcols"); if (!c) return;
     c.innerHTML = [1, 2, 3, 4, 5, 6].map((n) => '<button class="' + (CFG.cols === n ? "on" : "") + '" data-c="' + n + '">' + n + '</button>').join("");
     c.querySelectorAll("button").forEach((b) => { b.onclick = () => { CFG.cols = +b.dataset.c; save(); buildCols(); applyGrid(); }; }); }
-  function closeSettings() { const s = g("mxset"); if (s) s.classList.add("hidden"); document.removeEventListener("mousedown", onDocDown); document.removeEventListener("keydown", onSetKey); }
+  function closeSettings() { const s = g("mxset"); if (s) { s.classList.add("hidden"); s.style.display = "none"; } document.removeEventListener("mousedown", onDocDown); document.removeEventListener("keydown", onSetKey); }
   function onDocDown(e) { const s = g("mxset"); if (!s || s.classList.contains("hidden")) return; if (s.contains(e.target) || (e.target && e.target.id === "mxgear")) return; closeSettings(); }
   function onSetKey(e) { if (e.key === "Escape") closeSettings(); }
   function openSettings() {
@@ -111,7 +111,8 @@
     if (!s.classList.contains("hidden")) { closeSettings(); return; }     // повторный клик по ⚙ — закрыть
     const st = g("mxstat");
     try {
-      s.classList.remove("hidden");
+      s.classList.remove("hidden"); s.style.display = "";
+      const hh = s.querySelector(".mxseth"); if (hh && hh.childNodes[0]) hh.childNodes[0].nodeValue = "Настройки сетки · v186  ";   // видно версию при открытии
       s.onmousedown = (e) => e.stopPropagation();     // не отдавать mousedown драгу окна — иначе клики внутри «съедаются»
       const xb = g("mxset-x"); if (xb) { xb.onmousedown = (e) => { e.preventDefault(); e.stopPropagation(); closeSettings(); }; xb.onclick = closeSettings; }
       document.addEventListener("keydown", onSetKey);
@@ -123,17 +124,23 @@
     } catch (e) { if (st) { st.textContent = "НАСТР.ОШИБКА: " + (e && e.message || e); st.style.color = "#ef5f5a"; } }
   }
 
-  // ── лента спред-коллов ──
-  function pushAlert(sym, gap, rise, bucket) {
-    FEED.unshift({ sym, gap, rise, bucket, t: Date.now() }); if (FEED.length > 80) FEED.length = 80;
+  // ── лента спред-коллов: живой список монет со спредом ≥ порога ──
+  function alertChime(sym, gap, bucket) {
     chime(bucket >= 15);
     try { if (typeof notify === "function") notify("Спред " + sym.replace("_USDT", "") + " Δ" + gap.toFixed(1) + "%", bucket >= 15 ? "warn" : "info"); } catch (e) {}
   }
   function processRows(rows) {
-    for (const r of rows) { const b = bucketOf(r.gap);
-      if (b >= CFG.thresh) { const prev = SEEN[r.symbol] || 0; if (b > prev) { if (!firstScan) pushAlert(r.symbol, r.gap, r.rise, b); SEEN[r.symbol] = b; } }
-      else SEEN[r.symbol] = 0;
+    const nowT = Date.now(), seen = new Set();
+    for (const r of rows) {
+      if (r.gap < CFG.thresh) continue;
+      seen.add(r.symbol);
+      const b = bucketOf(r.gap), cur = ACTIVE[r.symbol];
+      if (!cur) { ACTIVE[r.symbol] = { sym: r.symbol, gap: r.gap, rise: r.rise, ex: r.ex, bucket: b, t: nowT };
+        if (!firstScan) alertChime(r.symbol, r.gap, b); }                       // новая монета вошла в спред
+      else { const up = b > cur.bucket; cur.gap = r.gap; cur.rise = r.rise; cur.ex = r.ex; cur.bucket = b;
+        if (up && !firstScan) alertChime(r.symbol, r.gap, b); }                 // пробила порог выше
     }
+    for (const sym in ACTIVE) if (!seen.has(sym)) delete ACTIVE[sym];           // спред сжался — убрать из ленты
     firstScan = false;
   }
   function gapClass(b) { return b >= 50 ? "g50" : b >= 30 ? "g30" : b >= 20 ? "g20" : b >= 15 ? "g15" : b >= 10 ? "g10" : b >= 8 ? "g8" : b >= 5 ? "g5" : ""; }
@@ -148,11 +155,12 @@
   function renderFeed(bySym) {
     const feed = g("mxfeed"); if (!feed) return; let html = "";
     for (const sym of CFG.pinned) { const d = PINDATA[sym] || {}; const r = bySym[sym]; html += feedRow(sym, d.gap || 0, d.rise || 0, "закреплено", true, r && r.ex); }
-    for (const f of FEED) { if (CFG.pinned.indexOf(f.sym) >= 0) continue; html += feedRow(f.sym, f.gap, f.rise, hhmmss(f.t), false, (bySym[f.sym] || {}).ex); }
-    if (!html) { feed.innerHTML = '<div class="mxfhint">Здесь появятся монеты, когда цена между биржами разъедется (порог ниже ↓).</div>'; return; }
+    const list = Object.keys(ACTIVE).filter((s) => CFG.pinned.indexOf(s) < 0).map((s) => ACTIVE[s]).sort((a, b) => b.gap - a.gap);
+    for (const a of list) html += feedRow(a.sym, a.gap, a.rise, hhmmss(a.t), false, a.ex);
+    if (!html) { feed.innerHTML = '<div class="mxfhint">Пока нет монет со спредом ≥ ' + CFG.thresh + '%. Появятся здесь, когда цена между биржами разъедется (порог настраивается внизу).</div>'; return; }
     feed.innerHTML = html;
     feed.querySelectorAll(".mxrpin").forEach((el) => { el.onclick = (e) => { e.stopPropagation(); unpin(el.dataset.unpin); }; });
-    feed.querySelectorAll(".mxrow").forEach((el) => { el.onclick = () => setCardCoin(0, el.dataset.sym); });
+    feed.querySelectorAll(".mxrow").forEach((el) => { el.onclick = () => openInCell(el.dataset.sym); });
   }
 
   // ── применить размеры сетки/ленты (из настроек) ──
@@ -169,18 +177,17 @@
     CFG.cards.forEach((sym, idx) => {
       const cell = document.createElement("div"); cell.className = "mxcell"; cell.dataset.idx = idx;
       if (!sym) {
-        cell.innerHTML = '<div class="mxempty">выбери монету<input class="mxcsearch" list="mxsymlist" placeholder="напр. GWEI"></div>';
+        cell.innerHTML = '<div class="mxempty">выбери монету<input class="mxcsearch" placeholder="напр. GWEI" autocomplete="off"></div>';
       } else {
         cell.innerHTML = '<div class="mxchead"><span class="mxcsym" title="клик — открыть стакан (Ourbit / WEEX / MEXC)">📖 ' + sym.replace("_USDT", "") + '</span>' +
-          '<span class="mxca hidden">CA</span><span class="mxchg"></span><span class="mxsp"></span><b class="mxcgap"></b>' +
-          '<input class="mxcsearch" list="mxsymlist" placeholder="поиск"><button class="mxcx" title="убрать ячейку">×</button></div>' +
+          '<span class="mxca hidden">CA</span><span class="mxchg"></span><span class="mxsp"></span><b class="mxcgap" title="спред между биржами"></b>' +
+          '<button class="mxcedit" title="сменить монету — поиск">✏</button><button class="mxcx" title="убрать ячейку">×</button></div>' +
           '<canvas class="mxccanvas"></canvas><div class="mxcfoot"></div>';
       }
       grid.appendChild(cell);
-      const inp = cell.querySelector(".mxcsearch");
-      if (inp) { const commit = () => { const v = inp.value; if (v) { setCardCoin(idx, v); } };
-        inp.addEventListener("keydown", (e) => { if (e.key === "Enter") commit(); });
-        inp.addEventListener("change", commit); }
+      const inp = cell.querySelector(".mxcsearch");                 // поле в пустой ячейке — открывает поиск
+      if (inp) inp.addEventListener("focus", () => openSearchAt(inp, idx));
+      const ed = cell.querySelector(".mxcedit"); if (ed) ed.onclick = () => openSearchAt(ed, idx);   // карандаш = поиск/смена монеты
       const sy = cell.querySelector(".mxcsym"); if (sy) sy.onclick = () => openBookMenu(sym, sy);
       const cx = cell.querySelector(".mxcx"); if (cx) cx.onclick = () => { CFG.cards.splice(idx, 1); save(); renderGrid(); };
       const cv = cell.querySelector(".mxccanvas"); if (cv) cv.addEventListener("wheel", (e) => { e.preventDefault();
@@ -189,6 +196,11 @@
   }
   function setCardCoin(idx, raw) { const sym = normSym(raw); if (!sym) return;
     if (idx >= CFG.cards.length) CFG.cards.push(sym); else CFG.cards[idx] = sym;
+    save(); renderGrid(); poll(); }
+  function openInCell(raw) { const sym = normSym(raw); if (!sym) return;
+    if (CFG.cards.indexOf(sym) >= 0) return;            // уже открыта — не дублируем
+    let idx = CFG.cards.indexOf("");                    // есть пустая ячейка? заполнить её
+    if (idx >= 0) CFG.cards[idx] = sym; else CFG.cards.push(sym);   // иначе — новая ячейка рядом
     save(); renderGrid(); poll(); }
   function openInDom(sym) { if (!sym) return; const base = sym.replace("_USDT", "");
     try { navigator.clipboard.writeText(base); } catch (e) {}
@@ -232,18 +244,20 @@
     }
   }
   function spreadNow(sym) { const px = []; let rise = 0, hiT = -1;
-    const m = META[sym] || {}; for (const ex in m) { if (ex === "mexcfair" || ex === "dex") continue; const v = m[ex]; if (v && v.last) { px.push(v.last); if (v.turn > hiT) { hiT = v.turn; rise = v.rise; } } }
+    const m = META[sym] || {}; for (const ex in m) { if (ex === "mexcfair") continue; const v = m[ex]; if (v && v.last) { px.push(v.last); if (v.turn > hiT) { hiT = v.turn; rise = v.rise; } } }   // DEX учитываем (MEXC↔DEX), справедливую — нет
     if (px.length < 2) return { gap: 0, rise }; const mn = Math.min(...px), mx = Math.max(...px); return { gap: (mx - mn) / mn * 100, rise }; }
 
   // ── опрос ──
+  let _pc = 0;
   async function poll() {
     if (!win() || win().classList.contains("hidden")) return;
+    _pc++;
     const feeds = CFG.ex.filter((e) => e !== "mexcfair" && e !== "dex");
     let bySym = {};
     if (feeds.length >= 2) {
       try { const gr = await fetch("/api/gaptop?n=80&minturn=" + CFG.minturn + "&maxgap=" + CFG.maxgap + "&ex=" + encodeURIComponent(feeds.join(","))).then((x) => x.json());
         if (gr && gr.ok) { for (const r of (gr.rows || [])) bySym[r.symbol] = r; processRows(gr.rows || []);
-          const st = g("mxstat2"); if (st) st.textContent = (gr.rows || []).length + " монет · " + FEED.length + " коллов · буфер " + Object.keys(BUF).length + " · порог " + CFG.thresh + "%"; } } catch (e) {}
+          const st = g("mxstat2"); if (st) st.textContent = (gr.rows || []).length + " монет · " + Object.keys(ACTIVE).length + " в спреде · порог " + CFG.thresh + "%"; } } catch (e) {}
     }
     const need = []; for (const s of CFG.cards) if (s && need.indexOf(s) < 0) need.push(s); for (const s of CFG.pinned) if (need.indexOf(s) < 0) need.push(s);
     if (need.length) {
@@ -261,7 +275,7 @@
     const w = win(); if (!w || w.classList.contains("hidden")) return;
     const grid = g("mxgrid"); if (!grid) return;
     try { for (const cell of grid.children) { const idx = +cell.dataset.idx, sym = CFG.cards[idx]; if (sym) drawCell(cell, sym); } }
-    catch (e) { const s = g("mxstat"); if (s) { s.textContent = "v176 РИС.ОШИБКА: " + (e && e.message || e); s.style.color = "#ef5f5a"; } }
+    catch (e) { const s = g("mxstat"); if (s) { s.textContent = "РИС.ОШИБКА: " + (e && e.message || e); s.style.color = "#ef5f5a"; } }
   }
 
   function drawCell(cell, sym) {
@@ -285,13 +299,22 @@
       x.strokeStyle = "rgba(255,255,255,.05)"; x.beginPath(); x.moveTo(padL, yy); x.lineTo(W - padR, yy); x.stroke();
       x.fillStyle = "#3a4250"; x.fillText(p.toFixed(dec), padL + 2, yy - 2);
       x.fillStyle = "#5b6573"; x.fillText(((p - lo) / (lo || 1) * 100).toFixed(0) + "%", W - padR + 4, yy + 8); }
-    // линии (плавные)
+    // линии — тонкие, сглаженные (плавная кривая через середины точек: живо, но без рывков)
     const pills = [];
+    x.lineJoin = "round"; x.lineCap = "round";
     for (const id of lines) { const b = BUF[sym + "::" + id], col = COL[id] || "#8a929c";
-      x.strokeStyle = col; x.lineWidth = id === "mexcfair" ? Math.max(1, CFG.lw * 0.75) : CFG.lw; if (id === "mexcfair") x.setLineDash([5, 3]); else x.setLineDash([]);
-      x.beginPath(); let started = false, lastV = 0;
-      for (let i = 0; i < b.length; i++) { const t = b[i][0]; if (t < tMin) { lastV = b[i][1]; continue; } const px = xOf(t), py = yOf(b[i][1]); if (!started) { if (i > 0) x.moveTo(xOf(tMin), yOf(lastV)); else x.moveTo(px, py); started = true; } x.lineTo(px, py); lastV = b[i][1]; }
-      x.stroke(); const lastPt = b[b.length - 1]; if (lastPt) pills.push({ y: yOf(lastPt[1]), v: lastPt[1], col }); }
+      const pts = []; let lastV = null;
+      for (let i = 0; i < b.length; i++) { const t = b[i][0]; if (t < tMin) { lastV = b[i][1]; continue; } pts.push([xOf(t), yOf(b[i][1])]); }
+      if (lastV != null) pts.unshift([xOf(tMin), yOf(lastV)]);            // якорь у левого края окна
+      const lastPt = b[b.length - 1]; if (lastPt) pills.push({ y: yOf(lastPt[1]), v: lastPt[1], col });
+      if (!pts.length) continue;
+      x.strokeStyle = col; x.lineWidth = id === "mexcfair" ? Math.max(0.8, CFG.lw * 0.7) : CFG.lw;
+      if (id === "mexcfair") x.setLineDash([4, 3]); else x.setLineDash([]);
+      x.beginPath(); x.moveTo(pts[0][0], pts[0][1]);
+      if (pts.length < 3) { for (let i = 1; i < pts.length; i++) x.lineTo(pts[i][0], pts[i][1]); }
+      else { for (let i = 1; i < pts.length - 1; i++) { const mx = (pts[i][0] + pts[i + 1][0]) / 2, my = (pts[i][1] + pts[i + 1][1]) / 2; x.quadraticCurveTo(pts[i][0], pts[i][1], mx, my); }
+        x.lineTo(pts[pts.length - 1][0], pts[pts.length - 1][1]); }
+      x.stroke(); }
     x.setLineDash([]);
     pills.sort((a, b) => a.y - b.y); const ph = 13; for (let i = 1; i < pills.length; i++) if (pills[i].y - pills[i - 1].y < ph) pills[i].y = pills[i - 1].y + ph;
     x.font = "10px ui-monospace,monospace";
@@ -302,25 +325,57 @@
     const chgEl = cell.querySelector(".mxchg"); if (chgEl && b0 && b0.length > 1) { let base = null; for (const p of b0) if (p[0] >= tMin) { base = p[1]; break; } if (base == null) base = b0[0][1]; const c = (b0[b0.length - 1][1] - base) / base * 100; chgEl.textContent = (c >= 0 ? "+" : "") + c.toFixed(2) + "%"; chgEl.className = "mxchg " + (c >= 0 ? "up" : "down"); }
     const gapEl = cell.querySelector(".mxcgap"); if (gapEl) { gapEl.textContent = "Δ" + sp.gap.toFixed(2) + "%"; gapEl.className = "mxcgap" + (sp.gap >= CFG.thresh ? " hot" : ""); }
     const ca = cell.querySelector(".mxca"); if (ca) ca.classList.toggle("hidden", !(m.dex));
-    const foot = cell.querySelector(".mxcfoot"); if (foot) { let turn = 0; for (const id of lines) if (m[id] && m[id].turn) turn = Math.max(turn, m[id].turn);
-      foot.innerHTML = lines.map((id) => '<span class="mxbadge" style="--exc:' + (COL[id] || "#8a929c") + '">' + (LBL[id] || id) + '</span>').join("") + '<span class="mxliq">' + fmtUsd(turn) + '</span>'; }
+    // подвал (THIEF): слева — на каких биржах есть монета; справа — D (актив/мин) · L (ликвидн.) · окно
+    const foot = cell.querySelector(".mxcfoot"); if (foot) {
+      let turn = 0; for (const id of lines) if (m[id] && m[id].turn) turn = Math.max(turn, m[id].turn);
+      const badges = lines.filter((id) => id !== "mexcfair" && id !== "dex").map((id) => '<span class="mxbadge" style="--exc:' + (COL[id] || "#8a929c") + '">' + (LBL[id] || id) + '</span>').join("");
+      const winLbl = (WINS.find((w) => w[0] === CFG.windowSec) || [0, CFG.windowSec + "с"])[1];
+      foot.innerHTML = badges + '<span class="mxsp"></span>' +
+        '<span class="mxfd" title="изменений цены в минуту (активность)">D:' + activity(sym, prim) + '</span>' +
+        '<span class="mxfl" title="ликвидность — 24ч оборот (ориентир по объёму входа)">L:' + fmtUsd(turn) + '</span>' +
+        '<span class="mxftf" title="окно графика (колесо мыши / кнопки внизу)">' + winLbl + '</span>';
+    }
   }
+  function activity(sym, ex) { const b = BUF[sym + "::" + ex]; if (!b || b.length < 2) return 0;
+    const c = nowS() - 60; let n = 0; for (let i = 1; i < b.length; i++) if (b[i][0] >= c && b[i][1] !== b[i - 1][1]) n++; return n; }
   function roundRect(x, X, Y, w, h, r) { x.beginPath(); x.moveTo(X + r, Y); x.arcTo(X + w, Y, X + w, Y + h, r); x.arcTo(X + w, Y + h, X, Y + h, r); x.arcTo(X, Y + h, X, Y, r); x.arcTo(X, Y, X + w, Y, r); x.closePath(); }
 
-  // ── датлист монет для поиска ──
-  async function loadSyms() { const dl = g("mxsymlist"); if (!dl || dl.childElementCount) return;
-    try { const r = await fetch("/api/mxsyms").then((x) => x.json()); if (r && r.ok) dl.innerHTML = (r.syms || []).slice(0, 4000).map((s) => '<option value="' + s + '">').join(""); } catch (e) {} }
+  // ── список монет + КАСТОМНЫЙ поиск-дропдаун в ячейке ──
+  async function loadSyms() { if (SYMS.length) return;
+    try { const r = await fetch("/api/mxsyms").then((x) => x.json()); if (r && r.ok) SYMS = r.syms || []; } catch (e) {} }
+  let SPOP = null, SIDX = -1;
+  function ensureSPop() { if (SPOP) return SPOP;
+    const p = document.createElement("div"); p.className = "mxsearchpop"; p.style.display = "none";
+    p.innerHTML = '<input class="mxsi" placeholder="монета (GWEI)…" autocomplete="off"><div class="mxsolist"></div>';
+    document.body.appendChild(p); SPOP = p;
+    const inp = p.querySelector(".mxsi");
+    inp.addEventListener("input", () => renderSearch(inp.value));
+    inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { const v = inp.value.trim(); if (v) setCardCoin(SIDX, v); closeSearch(); } else if (e.key === "Escape") closeSearch(); });
+    document.addEventListener("mousedown", (e) => { if (SPOP && SPOP.style.display !== "none" && !SPOP.contains(e.target) && !(e.target && e.target.classList && e.target.classList.contains("mxcedit"))) closeSearch(); }, true);
+    return p; }
+  function closeSearch() { if (SPOP) SPOP.style.display = "none"; SIDX = -1; }
+  function renderSearch(q) { const p = SPOP; if (!p) return; const box = p.querySelector(".mxsolist"); if (!box) return;
+    q = (q || "").trim().toUpperCase();
+    let list = q ? SYMS.filter((s) => s.indexOf(q) >= 0).sort((a, b) => a.indexOf(q) - b.indexOf(q) || a.length - b.length) : SYMS;
+    list = list.slice(0, 80);
+    box.innerHTML = list.length ? list.map((s) => '<div class="mxso" data-s="' + s + '">' + s + '</div>').join("") : '<div class="mxso-empty">ничего не найдено</div>';
+    box.querySelectorAll(".mxso").forEach((el) => { el.onmousedown = (e) => { e.preventDefault(); setCardCoin(SIDX, el.dataset.s); closeSearch(); }; });
+  }
+  function openSearchAt(anchor, idx) { loadSyms(); const p = ensureSPop(); SIDX = idx;
+    const inp = p.querySelector(".mxsi"); if (inp) inp.value = ""; renderSearch("");
+    const r = anchor.getBoundingClientRect(); p.style.left = Math.min(innerWidth - 236, Math.max(6, r.right - 228)) + "px"; p.style.top = (r.bottom + 4) + "px"; p.style.display = "block";
+    if (inp) setTimeout(() => inp.focus(), 0); }
 
   // ── окно ──
   // подготовить контент панели (наполнить сетку/панели) — вызывается и при загрузке, и при открытии
   function ensure() {
-    const stv = g("mxstat"); if (stv) { stv.textContent = "v176"; stv.style.color = "#6b7280"; }
+    const stv = g("mxstat"); if (stv) { stv.textContent = "v186"; stv.style.color = "#6b7280"; }
     try {
       if (!CFG.cards || !CFG.cards.length) { CFG.cards = DEF.cards.slice(); save(); }
       renderBar(); renderZoom(); renderGrid(); loadSyms();
       const sb = g("mxsound"); if (sb) sb.classList.toggle("on", CFG.sound);
       const th = g("mxthresh"); if (th) th.value = CFG.thresh;
-    } catch (e) { if (stv) { stv.textContent = "v176 ОШИБКА: " + (e && e.message || e); stv.style.color = "#ef5f5a"; } }
+    } catch (e) { if (stv) { stv.textContent = "v186 ОШИБКА: " + (e && e.message || e); stv.style.color = "#ef5f5a"; } }
   }
   function open() {
     const w = win(); if (!w) return;
@@ -346,6 +401,11 @@
     const ac = g("mxaddcard"); if (ac) ac.onclick = () => { CFG.cards.push(""); save(); renderGrid(); };
     const gr = g("mxgear"); if (gr) gr.onclick = openSettings;
     const gx = g("mxset-x"); if (gx) gx.onclick = closeSettings;
+    // НАДЁЖНЫЙ делегат: клик по крестику настроек ловим на уровне документа (мимо любых локальных перехватчиков)
+    document.addEventListener("mousedown", (e) => {
+      const t = e.target; if (!t) return;
+      if (t.id === "mxset-x" || (t.closest && t.closest("#mxset-x"))) { e.preventDefault(); e.stopPropagation(); closeSettings(); }
+    }, true);
     ensure();                                          // наполнить панель сразу (не ждать открытия) + впечатать версию
     if (!timer) timer = setInterval(poll, POLL_MS);    // опрос идёт всегда (poll сам молчит, если окно скрыто)
     if (!raf) raf = requestAnimationFrame(frame);      // рендер-цикл (frame сам молчит, если окно скрыто)

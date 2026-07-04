@@ -373,23 +373,33 @@ _MEXC_TRADE = {"connected": False}
 
 # ── WEEX (2-й источник стакана; торговля позже через веб-uid) ──
 from weex_client import _WEEX, to_v3 as _wx_v3
-_WEEX_INFO = {"ts": 0.0, "map": {}}
-def _weex_tick(sym):
+_WEEX_INFO = {"ts": 0.0, "map": {}, "qprec": {}}
+def _weex_load_info():
     now = time.time()
     if now - _WEEX_INFO["ts"] > 600:
         try:
             info = _WEEX.exchange_info() or {}
-            m = {}
+            m, q = {}, {}
             for s in (info.get("symbols") or []):
+                sym = s.get("symbol")
                 pp = s.get("pricePrecision")
                 if pp is not None:
-                    m[s.get("symbol")] = 10 ** (-int(pp))
+                    m[sym] = 10 ** (-int(pp))
+                qp = s.get("quantityPrecision")
+                if qp is not None:
+                    q[sym] = int(qp)         # число знаков после запятой в количестве (монеты)
             if m:
-                _WEEX_INFO["map"] = m
-                _WEEX_INFO["ts"] = now
+                _WEEX_INFO["map"] = m; _WEEX_INFO["qprec"] = q; _WEEX_INFO["ts"] = now
         except Exception:
             pass
+
+def _weex_tick(sym):
+    _weex_load_info()
     return _WEEX_INFO["map"].get(_wx_v3(sym), 0.0001)
+
+def _weex_qprec(sym):
+    _weex_load_info()
+    return _WEEX_INFO["qprec"].get(_wx_v3(sym), 0)   # 0 = целые монеты по умолчанию
 
 def _load_weex_creds():
     """Ключи WEEX из weex.txt (3 строки: key / secret / passphrase). Наружу не уходит (в .gitignore)."""
@@ -1933,10 +1943,10 @@ class Handler(BaseHTTPRequestHandler):
                 book, wsym, wts = _weex_ws_book()
                 if wsym == sym and book["bids"] and book["asks"] and (time.time() - wts) < 4:
                     self._json({"ok": True, "depth": {"symbol": sym, "bids": book["bids"], "asks": book["asks"], "ts": int(wts * 1000)},
-                                "tick": _weex_tick(sym), "src": "ws"})
+                                "tick": _weex_tick(sym), "qprec": _weex_qprec(sym), "src": "ws"})
                 else:
                     try:
-                        self._json({"ok": True, "depth": _WEEX.depth(sym), "tick": _weex_tick(sym), "src": "rest"})
+                        self._json({"ok": True, "depth": _WEEX.depth(sym), "tick": _weex_tick(sym), "qprec": _weex_qprec(sym), "src": "rest"})
                     except Exception as exc:
                         self._json({"ok": False, "error": str(exc)})
             elif route == "/api/weexsyms":            # список монет WEEX (для ярлыков в поиске)

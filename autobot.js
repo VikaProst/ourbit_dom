@@ -30,7 +30,8 @@
       aheadTicks: 1,     // «чуть раньше» ММ (поджатие): агрессивнее середины на N тиков
       deepTicks: 12,     // как глубоко искать дальнюю стену (прострел)
       wallMinUsd: 300,   // стена меньше этого ($) не считается стеной — от неё спред не собираем
-      wallFrac: 0.4,     // стена считается доминирующей, если ≥ этой доли ликвидности в окне
+      wallFrac: 0.3,     // стена доминирующая, если ≥ этой доли ликвидности окна
+      wallKeepFrac: 0.4, // цель держим, пока у стены ≥ этой доли исходного объёма (в ±2 тика)
       tpFrac: 0.6,       // прострел: доля пути от входа к середине для тейка
       trendSec: 10,      // окно определения тренда
       trendTicks: 4,     // мин. ход за окно, чтобы считать трендом
@@ -190,16 +191,64 @@
     return res;
   }
 
+  // ДОМИНИРУЮЩАЯ стена: самый КРУПНЫЙ уровень в окне; засчитывается только если ≥ minUsd И доминирует
+  // (≥ frac от суммарной ликвидности окна). Так встаём у настоящего большого маркетоса, а не у мелочи/середины.
+  function dominantWall(side, maxTicks, minUsd, frac) {
+    const d = S.depth; if (!d) return null;
+    const t = tk(), arr = side === "buy" ? d.bids : d.asks, best = side === "buy" ? S.bestBid : S.bestAsk;
+    if (!arr || !best) return null;
+    let bestL = null, sum = 0;
+    for (const [p, v] of arr) {
+      if (!(v > 0)) continue;
+      const off = side === "buy" ? (best - p) : (p - best);
+      if (off <= 0 || off > maxTicks * t) continue;
+      const usd = v * cs() * p; sum += usd;
+      if (!bestL || usd > bestL.usd) bestL = { p, v, usd, off };
+    }
+    if (!bestL) return null;
+    if (minUsd > 0 && bestL.usd < minUsd) return null;
+    if (frac > 0 && sum > 0 && bestL.usd / sum < frac) return null;
+    return { price: bestL.p, vol: bestL.v, usd: bestL.usd, offT: Math.round(bestL.off / t) };
+  }
+  // «Стена жива» — устойчиво к дрожанию: максимум объёма в ±2 тика от якоря ≥ wallKeepFrac исходного.
+  function wallAliveAt(side, wallPx, wallVol0) {
+    if (!wallPx || !(wallVol0 > 0)) return false;
+    const t = tk(); let best = 0;
+    for (let k = -2; k <= 2; k++) { const v = queueAt(side, snap(wallPx + k * t)); if (v > best) best = v; }
+    return best >= wallVol0 * (AB.cfg.wallKeepFrac || 0.4);
+  }
+  // «Стена мертва» подтверждается 3 подряд мёртвыми чтениями (гасит транзиентный gap=0 стакана).
+  function wallDeadConfirmed(side, cur) {
+    const k = side === "buy" ? "_deadBuy" : "_deadSell";
+    if (wallAliveAt(side, cur.wallPx, cur.wallVol)) { AB[k] = 0; return false; }
+    AB[k] = (AB[k] || 0) + 1;
+    return AB[k] >= 3;
+  }
+  // ЗАЛОК ЦЕЛИ: единственная точка расчёта цены. Пока стена жива — цель НЕ меняется (лимитка стоит, ждёт прострел).
+  function getTarget(side) {
+    const key = side === "buy" ? "tgtBuy" : "tgtSell", cur = AB[key], t = tk(), C = AB.cfg;
+    if (cur && !wallDeadConfirmed(side, cur)) return cur;
+    const range = Math.max(C.deepTicks || 12, 60);
+    const wall = dominantWall(side, range, C.wallMinUsd > 0 ? C.wallMinUsd : 0, C.wallFrac || 0.3);
+    if (!wall) { AB[key] = null; AB._noWall = true; return null; }
+    AB._noWall = false;
+    const buy = side === "buy";
+    const price = buy ? snap(wall.price + C.aheadTicks * t) : snap(wall.price - C.aheadTicks * t);
+    const tp = buy ? snap(price + C.profitTicks * t) : snap(price - C.profitTicks * t);
+    AB[key] = { side, price, tpPrice: tp, wallPx: wall.price, wallVol: wall.vol, offT: wall.offT, usd: wall.usd, bornAt: Date.now() };
+    return AB[key];
+  }
+
   // ── ЯКОРЬ К МАРКЕТОСУ: лимитку ставим на тик ВПЕРЕДИ ближайшей крупной стены. ──
   // Тренд решает сторону (не входить против тренда). Нет стены рядом → В ПУСТОТУ НЕ СТАВИМ.
   function planEntry(bb, ba, sprT) {
     const t = tk(), C = AB.cfg;
     const dir = trendDir(C.trendSec);
     const allowBuy = dir >= 0, allowSell = dir <= 0;
-    const range = Math.max(C.deepTicks || 12, 90);              // маркетос бывает далеко (ловим прострел) — ищем глубоко
-    const minUsd = C.wallMinUsd > 0 ? C.wallMinUsd : 500;
-    const wb = allowBuy ? nearestWall("buy", range, minUsd) : null;
-    const ws = allowSell ? nearestWall("sell", range, minUsd) : null;
+    const range = Math.max(C.deepTicks || 12, 60);
+    const minUsd = C.wallMinUsd > 0 ? C.wallMinUsd : 0, frac = C.wallFrac || 0.3;
+    const wb = allowBuy ? dominantWall("buy", range, minUsd, frac) : null;
+    const ws = allowSell ? dominantWall("sell", range, minUsd, frac) : null;
     let side = null, wall = null;
     if (wb && ws) { if (wb.offT <= ws.offT) { side = "buy"; wall = wb; } else { side = "sell"; wall = ws; } }
     else if (wb) { side = "buy"; wall = wb; }
@@ -238,13 +287,12 @@
     AB.qBuy = null; AB.qSell = null; AB.state = "inpos";
     abLog(`✅ ЗАЛИЛО ${long ? "LONG" : "SHORT"} @${q.price.toFixed(dc())} — тейк @${q.tpPrice.toFixed(dc())} (лимитки сняты)`, "ok");
   }
-  function manageSidePaper(side) {                              // поставить/держать/переставить одну сторону
-    const key = side === "buy" ? "qBuy" : "qSell", cur = AB[key];
-    const plan = planSide(side);
-    if (!plan) { if (cur) AB[key] = null; return; }             // маркетоса этой стороны нет → снять заявку
-    if (cur && wallAlive(cur)) return;                          // стена жива → держим (ждём прострел, НЕ спамим)
-    AB[key] = makePaperQuote(plan);
-    abLog(`[2стор ${side === "buy" ? "BUY" : "SELL"} маркетос ${plan.offT}т $${Math.round(plan.usd)}] @${plan.price.toFixed(dc())}`);
+  function manageSidePaper(side) {                              // ставим/держим у ЗАЛОЧЕННОЙ цели (getTarget)
+    const key = side === "buy" ? "qBuy" : "qSell", cur = AB[key], tgt = getTarget(side);
+    if (!tgt) { if (cur) AB[key] = null; return; }              // маркетоса нет → снять
+    if (cur && ticksBetween(cur.price, tgt.price) < 0.5) return; // цена та же → держим, ждём прострел (не пересоздаём)
+    AB[key] = makePaperQuote(tgt);
+    abLog(`[2стор ${side === "buy" ? "BUY" : "SELL"} маркетос ${tgt.offT}т $${Math.round(tgt.usd)}] @${tgt.price.toFixed(dc())}`);
   }
   function twoSidedPaperStep(bb, ba, sprT) {
     if (now() < AB.cooldownUntil) return;
@@ -290,12 +338,17 @@
     if (!plan) { abLog("маркетос ушёл — снимаю заявку"); AB.entry = null; AB.state = "idle"; return; }
     if (plan.side !== e.side || ticksBetween(plan.price, e.price) >= (C.requoteTicks || 3)) placeEntry(plan);
   }
-  function checkStop(bb, ba) {
-    const p = AB.pos, C = AB.cfg;
-    const adverse = p.long ? bb : ba;
-    const lossT = p.long ? (p.price - adverse) / tk() : (adverse - p.price) / tk();
-    if (lossT >= C.stopTicks) { closeAt(adverse, `стоп ${C.stopTicks}т`, true); return; }
-    if (now() - p.t >= C.maxHoldSec * 1000) closeAt(p.long ? bb : ba, `время ${C.maxHoldSec}с`, true);
+  // PAPER: позицию закрываем ТОЛЬКО лимиткой (тейк). Долго не дошёл → двигаем лимит закрытия к рынку (маркер), без маркета.
+  function manageCloseLimit(bb, ba) {
+    const p = AB.pos, C = AB.cfg, ms = now();
+    if (ms - p.t >= C.maxHoldSec * 1000) {
+      const edge = p.long ? ba : bb, newPx = snap(edge);
+      if (ticksBetween(newPx, AB.close.price) >= 1) {
+        AB.close.price = newPx; AB.close.since = ms; AB.close._seen = ms; AB.close.fillVol = 0; AB.close.queue = queueAt(AB.close.side, newPx);
+        p.t = ms;
+        abLog(`тейк не дошёл — лимит закрытия к рынку @${newPx.toFixed(dc())}`);
+      }
+    }
   }
 
   // ── главный цикл ──────────────────────────────────────────────────────────
@@ -307,13 +360,14 @@
     } catch (e) {}
   }
   function resetRuntime(silent) {
-    if (!AB.paper && (AB.entry || AB.pos)) {                    // РЕАЛ: снять свои заявки, чтоб не висели
+    if (!AB.paper) {                                            // РЕАЛ: ВСЕГДА снять свои заявки (в двустороннем entry не заполняется!)
       cancelBotOrders();
       if (AB.pos) abLog("⚠ позиция ОСТАЛАСЬ открыта — закрой вручную (D/Alt-клик)", "err");
       else abLog("снял заявки бота");
     }
     AB.state = "idle"; AB.entry = null; AB.pos = null; AB.close = null;
-    AB.qBuy = null; AB.qSell = null; AB.rqBuy = null; AB.rqSell = null; AB.cooldownUntil = 0;
+    AB.qBuy = null; AB.qSell = null; AB.rqBuy = null; AB.rqSell = null; AB.io = {};
+    AB._deadBuy = 0; AB._deadSell = 0; AB.tgtBuy = null; AB.tgtSell = null; AB.cooldownUntil = 0;
     if (!silent && AB.paper) abLog("сброс");
   }
   // Стена ММ: если Вика НЕ вписала вручную — тянем из стакана «Крупный объём USD»; вписала — не трогаем.
@@ -351,47 +405,87 @@
     if (AB.paper || !S.exMexc || !AB._mexcConn || !AB.on) return;
     try { const r = await fetch("/api/mexcaccount?symbol=" + encodeURIComponent(S.symbol)).then((x) => x.json()); if (r && r.ok) AB._mexcAcct = r; } catch (e) {}
   }
-  // управление открытой позицией MEXC (общее для одно- и двустороннего): тейк уже стоит, тут стоп/лимит/тайм.
+  // ── МЕХАНИЗМ INTENT per-side: NONE→PENDING→LIVE с таймаутом ожидания поллинга (анти-дубль, устойчив к лагу) ──
+  const IO_PENDING_MS = 3000;
+  function ioSlot(side) { if (!AB.io) AB.io = {}; return AB.io[side] || (AB.io[side] = { state: "NONE", price: 0, id: 0, at: 0, busy: false }); }
+  function cancelSideById(side, id) { const io = ioSlot(side); io.busy = true; abPost("/api/mexccancel", { id }).then(() => { io.busy = false; io.state = "NONE"; io.id = 0; }); }
+  function placeSide(side, want, ms) {
+    const io = ioSlot(side); io.busy = true; io.state = "PENDING"; io.price = want.price; io.at = ms;
+    const oside = side === "buy" ? RSIDE.OPEN_LONG : RSIDE.OPEN_SHORT;
+    mexcOrder(oside, ROT.LIMIT, want.price, vol(want.price), 0).then((r) => {
+      io.busy = false;
+      if (r && r.ok) abLog(`[РЕАЛ 2стор ${side === "buy" ? "BUY" : "SELL"} ${want.offT}т] @${want.price.toFixed(dc())}`);
+      else { io.state = "NONE"; abLog(`MEXC ${side} отклонён: ${(r && (r.error || (r.resp && r.resp.message))) || "?"}`, "err"); }
+    });
+  }
+  // Реконсилер ОДНОЙ стороны: приводим реальные ордера к желаемому (ровно 1 у цели). Устойчив к лагу поллинга.
+  function reconcileSide(side, want, orders, ms) {
+    const io = ioSlot(side), t = tk();
+    const openSide = side === "buy" ? RSIDE.OPEN_LONG : RSIDE.OPEN_SHORT;
+    const tol = ((AB.cfg.requoteTicks || 3) + 0.5) * t;
+    const mine = orders.filter((o) => o.side === openSide);
+    if (mine.length > 1) { if (!io.busy) cancelSideById(side, mine[1].id); return; }   // дедуп: лишний снять
+    const live = mine[0] || null;
+    if (live) { io.state = "LIVE"; io.id = live.id; io.price = live.price; }
+    else if (io.state === "PENDING") { if (ms - io.at > IO_PENDING_MS) io.state = "NONE"; else return; }   // ждём отражения — НЕ дублируем
+    if (io.busy) return;
+    if (want == null) { if (live) cancelSideById(side, live.id); else io.state = "NONE"; return; }
+    if (live) { if (Math.abs(live.price - want.price) > tol) cancelSideById(side, live.id); return; }   // цена совпала → СТОИМ (ждём прострел)
+    placeSide(side, want, ms);
+  }
+  // Переход в позицию (один раз): снять обе входные, поставить reduce-лимитку.
+  function enterPos(pos, ms) {
+    if (AB.state === "inpos" && AB.pos) return;
+    const long = pos.side === 1, t = tk(), C = AB.cfg;
+    const tp = long ? snap(pos.avg + C.profitTicks * t) : snap(pos.avg - C.profitTicks * t);
+    mexcCancelAllReal(); AB.io = {};
+    AB.pos = { long, price: pos.avg, vol: pos.vol, t: ms, kind: "2стор" };
+    AB.close = { side: long ? "sell" : "buy", price: tp, id: 0, state: "NONE", busy: false, at: 0 };
+    AB.state = "inpos";
+    abLog(`✅ РЕАЛ MEXC залило ${long ? "LONG" : "SHORT"} @${pos.avg} — тейк-лимит @${tp.toFixed(dc())} (входные сняты)`, "ok");
+  }
+  // Управление позицией MEXC: ровно ОДНА reduce-лимитка. Маркет — ТОЛЬКО авария (позиция >3× лота).
   function mexcManagePos(bb, ba) {
     const C = AB.cfg, t = tk(), ms = Date.now(), pos = mexcPos();
-    if (!(pos && pos.vol > 0)) { AB.stats.trades++; abLog("💚 РЕАЛ MEXC позиция закрыта", "ok"); AB.pos = null; AB.close = null; AB.state = "idle"; AB._realCd = ms + C.cooldownSec * 1000; return; }
-    const usd = pos.vol * cs() * (AB.pos.long ? bb : ba);
-    if (usd > C.sizeUsd * 2) { abLog("🛑 MEXC позиция превысила лимит — аварийно закрываю, стоп бота", "err"); mexcCancelAllReal(); mexcCloseMarket(pos); AB.on = false; syncToggleBtn(); return; }
-    const adverse = AB.pos.long ? bb : ba, lossT = AB.pos.long ? (AB.pos.price - adverse) / t : (adverse - AB.pos.price) / t;
-    if (lossT >= C.stopTicks) { abLog(`РЕАЛ MEXC стоп ${C.stopTicks}т`, "err"); mexcCancelAllReal(); mexcCloseMarket(pos); }
-    else if (ms - AB.pos.t >= C.maxHoldSec * 1000) { mexcCancelAllReal(); mexcCloseMarket(pos); }
+    if (!(pos && pos.vol > 0)) {
+      if (AB.state === "inpos") { AB.stats.trades++; abLog("💚 РЕАЛ MEXC позиция закрыта (лимит)", "ok"); }
+      AB.pos = null; AB.close = null; AB.state = "idle"; AB.io = {}; AB._realCd = ms + C.cooldownSec * 1000; return;
+    }
+    const long = pos.side === 1, cside = long ? RSIDE.CLOSE_LONG : RSIDE.CLOSE_SHORT;
+    const cl = AB.close || (AB.close = { side: long ? "sell" : "buy", price: 0, id: 0, state: "NONE", busy: false, at: 0 });
+    const usd = pos.vol * cs() * (long ? bb : ba);
+    if (usd > C.sizeUsd * 3) { abLog("🛑 позиция >3× лота — аварийный маркет-выход, стоп бота", "err"); mexcCancelAllReal(); mexcCloseMarket(pos); AB.on = false; syncToggleBtn(); return; }
+    if (ms - AB.pos.t >= C.maxHoldSec * 1000) {                 // тейк не дошёл → шагаем ЛИМИТ к рынку (мейкер)
+      const edge = long ? ba : bb;
+      if (ticksBetween(edge, cl.price) >= 1) { cl.price = snap(edge); cl.state = "NONE"; AB.pos.t = ms; abLog(`тейк не дошёл — лимит закрытия к рынку @${snap(edge).toFixed(dc())}`); }
+    }
+    // реконсилер ЗАКРЫТИЯ: ровно одна reduce-лимитка на cl.price (переставит, если биржа отклонила)
+    const orders = (AB._mexcAcct && AB._mexcAcct.orders) || [];
+    const closes = orders.filter((o) => o.side === cside);
+    const tol = ((C.requoteTicks || 3) + 0.5) * t;
+    const good = closes.find((o) => Math.abs(o.price - cl.price) <= tol);
+    if (cl.busy) return;
+    const extra = closes.find((o) => o !== good);
+    if (extra) { cl.busy = true; abPost("/api/mexccancel", { id: extra.id }).then(() => { cl.busy = false; }); return; }
+    if (good) { cl.state = "LIVE"; cl.id = good.id; return; }
+    if (cl.state === "PENDING") { if (ms - cl.at > IO_PENDING_MS) cl.state = "NONE"; else return; }
+    cl.busy = true; cl.state = "PENDING"; cl.at = ms;
+    mexcOrder(cside, ROT.LIMIT, cl.price, pos.vol, pos.id).then((r) => { cl.busy = false; if (!(r && r.ok)) { cl.state = "NONE"; abLog("тейк-лимит отклонён — повтор", "err"); } });
   }
-  // MEXC двусторонний: держим реальные лимитки с обеих сторон; при заливе снимаем ОБЕ и ставим тейк.
-  function maintainRealMexcSide(side) {
-    if (AB._mexcBusy) return;
-    const key = side === "buy" ? "rqBuy" : "rqSell", cur = AB[key], plan = planSide(side);
-    if (!plan) { if (cur && cur.orderId) { AB._mexcBusy = true; abPost("/api/mexccancel", { id: cur.orderId }).then(() => { AB._mexcBusy = false; }); AB[key] = null; } return; }
-    if (cur && wallAlive({ side, wallPx: cur.wallPx, wallVol: cur.wallVol })) return;   // держим
-    const v = vol(plan.price), oside = side === "buy" ? RSIDE.OPEN_LONG : RSIDE.OPEN_SHORT;
-    AB._mexcBusy = true;
-    const place = () => mexcOrder(oside, ROT.LIMIT, plan.price, v, 0).then((r) => {
-      AB._mexcBusy = false;
-      if (r && r.ok) { const oid = r.resp && r.resp.data && (r.resp.data.orderId || r.resp.data); AB[key] = { price: plan.price, wallPx: plan.wallPx, wallVol: plan.wallVol, tp: plan.tpPrice, orderId: oid, placedAt: Date.now() }; abLog(`[РЕАЛ 2стор ${side === "buy" ? "BUY" : "SELL"} ${plan.offT}т] @${plan.price.toFixed(dc())}`); }
-      else abLog(`MEXC ${side} отклонён: ${(r && (r.error || (r.resp && r.resp.message))) || "?"}`, "err");
-    });
-    if (cur && cur.orderId) abPost("/api/mexccancel", { id: cur.orderId }).then(place); else place();
-  }
+  // MEXC двусторонний — реконсилер обеих сторон + переход в позицию.
   function realStepMexcTwo(bb, ba) {
     const reason = realBlockReason(); if (reason) { AB._realReason = reason; return; }
     AB._realReason = null;
     const ms = Date.now(), pos = mexcPos();
-    if (AB.state === "inpos" && AB.pos) { mexcManagePos(bb, ba); return; }
-    if (pos && pos.vol > 0) {                                   // одну сторону залило → снять ОБЕ заявки, поставить тейк
-      const long = pos.side === 1, cside = long ? RSIDE.CLOSE_LONG : RSIDE.CLOSE_SHORT;
-      const q = long ? AB.rqBuy : AB.rqSell, tp = q ? q.tp : (long ? pos.avg * 1.001 : pos.avg * 0.999);
-      AB._mexcBusy = true; mexcCancelAllReal();
-      mexcOrder(cside, ROT.LIMIT, tp, pos.vol, pos.id).then(() => { AB._mexcBusy = false; });
-      AB.pos = { long, price: pos.avg, vol: pos.vol, t: ms, kind: "2стор" }; AB.close = { price: tp };
-      AB.rqBuy = null; AB.rqSell = null; AB.state = "inpos";
-      abLog(`✅ РЕАЛ MEXC залило ${long ? "LONG" : "SHORT"} @${pos.avg} — тейк @${tp.toFixed(dc())} (лимитки сняты)`, "ok");
-      return;
+    if (pos && pos.vol > 0) { enterPos(pos, ms); mexcManagePos(bb, ba); return; }   // залив
+    if (AB.state === "inpos") { mexcManagePos(bb, ba); return; }                     // позиция ушла из поллинга — закроем цикл
+    const orders = (AB._mexcAcct && AB._mexcAcct.orders) || [];
+    if (orders.length > 3 && !AB._mexcBusy) {                    // СТРАХОВКА: любой сбой сопоставления → не даём накопиться
+      AB._mexcBusy = true; abLog(`⚠ ${orders.length} заявок на бирже — снимаю ВСЕ (страховка)`, "err");
+      mexcCancelAllReal().then(() => { AB._mexcBusy = false; }); AB.io = {}; return;
     }
-    maintainRealMexcSide("buy"); maintainRealMexcSide("sell");
+    reconcileSide("buy", getTarget("buy"), orders, ms);
+    reconcileSide("sell", getTarget("sell"), orders, ms);
   }
   function realStepMexc(bb, ba, sprT) {
     const reason = realBlockReason();
@@ -427,8 +521,8 @@
         }
       }
     } else if (AB.state === "inpos" && AB.pos) {
-      if (!(pos && pos.vol > 0)) { AB.stats.trades++; abLog("💚 РЕАЛ MEXC позиция закрыта", "ok"); AB.pos = null; AB.close = null; AB.state = "idle"; AB._realCd = ms + C.cooldownSec * 1000; }
-      else {
+      mexcManagePos(bb, ba);   // закрытие лимиткой (см. общий обработчик)
+      if (false) {
         const usd = pos.vol * cs() * (AB.pos.long ? bb : ba);
         if (usd > C.sizeUsd * 2) { abLog("🛑 MEXC позиция превысила лимит — аварийно закрываю, стоп бота", "err"); mexcCancelAllReal(); mexcCloseMarket(pos); AB.on = false; syncToggleBtn(); return; }
         const adverse = AB.pos.long ? bb : ba, lossT = AB.pos.long ? (AB.pos.price - adverse) / t : (adverse - AB.pos.price) / t;
@@ -494,7 +588,7 @@
       if (bb && ba && ba > bb) {
         const sprT = Math.round((ba - bb) / t);
         if (!AB.paper) { if (S.exMexc) realStepMexc(bb, ba, sprT); else realStep(bb, ba, sprT); }   // РЕАЛ (MEXC через веб-токен / Ourbit через терминал)
-        else if (AB.state === "inpos" && AB.pos) { if (AB.close && printFilled(AB.close)) closeAt(AB.close.price, "тейк", false); else checkStop(bb, ba); }
+        else if (AB.state === "inpos" && AB.pos) { if (AB.close && printFilled(AB.close)) closeAt(AB.close.price, "тейк", false); else manageCloseLimit(bb, ba); }
         else if (AB.twoSided) { twoSidedPaperStep(bb, ba, sprT); }                                  // PAPER двусторонний (лимитки с обеих сторон)
         else if (AB.state === "quoting" && AB.entry) { if (printFilled(AB.entry)) onEntryFilled(); else maybeRequote(bb, ba, sprT); }
         else if (AB.state === "idle" && now() >= AB.cooldownUntil) { const plan = planEntry(bb, ba, sprT); if (plan) placeEntry(plan); }
@@ -847,7 +941,7 @@
   }
 
   // ── старт ───────────────────────────────────────────────────────────────────
-  function boot() { loadState(); injectStyle(); injectButton(); setInterval(step, 250); setInterval(mexcAcctPoll, 1000); }
+  function boot() { loadState(); injectStyle(); injectButton(); setInterval(step, 250); setInterval(mexcAcctPoll, 700); }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
   else boot();
 })();
