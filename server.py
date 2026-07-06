@@ -343,6 +343,50 @@ def _mx_kline(sym: str, minutes: int) -> list:
     return pts
 
 
+_EX_KL: dict = {}            # (ex,base) -> (points, ts, minutes) кэш свечей бирж
+
+
+def _ex_kline(ex: str, base: str, minutes: int) -> list:
+    """Свечи ЛЮБОЙ биржи → [[t_sec, close]] за `minutes` минут (полная история линии биржи, как у MEXC).
+    У каждой биржи свой формат — парсим по месту. Кэш 40с."""
+    key = (ex, base)
+    now = time.time()
+    c = _EX_KL.get(key)
+    if c and now - c[1] < 40 and c[2] == minutes:
+        return c[0]
+    lim = min(1000, max(30, minutes + 5))
+    pts = []
+    try:
+        if ex == "bybit":
+            u = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={base}USDT&interval=1&limit={min(1000, lim)}"
+            arr = (_get(u, timeout=10).json().get("result") or {}).get("list") or []
+            pts = [[int(x[0]) // 1000, _ff(x[4])] for x in arr if len(x) >= 5 and _ff(x[4]) > 0]
+        elif ex == "binance":
+            u = f"https://fapi.binance.com/fapi/v1/klines?symbol={base}USDT&interval=1m&limit={min(1500, lim)}"
+            arr = _get(u, timeout=10).json() or []
+            pts = [[int(x[0]) // 1000, _ff(x[4])] for x in arr if len(x) >= 5 and _ff(x[4]) > 0]
+        elif ex == "gate":
+            u = f"https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract={base}_USDT&interval=1m&limit={min(1999, lim)}"
+            arr = _get(u, timeout=12).json() or []
+            pts = [[int(x["t"]), _ff(x["c"])] for x in arr if isinstance(x, dict) and _ff(x.get("c")) > 0]
+        elif ex == "bitget":
+            u = f"https://api.bitget.com/api/v2/mix/market/candles?symbol={base}USDT&productType=usdt-futures&granularity=1m&limit={min(1000, lim)}"
+            arr = _get(u, timeout=10).json().get("data") or []
+            pts = [[int(x[0]) // 1000, _ff(x[4])] for x in arr if len(x) >= 5 and _ff(x[4]) > 0]
+        elif ex == "okx":
+            u = f"https://www.okx.com/api/v5/market/candles?instId={base}-USDT-SWAP&bar=1m&limit={min(300, lim)}"
+            arr = _get(u, timeout=10).json().get("data") or []
+            pts = [[int(x[0]) // 1000, _ff(x[4])] for x in arr if len(x) >= 5 and _ff(x[4]) > 0]
+        pts.sort()
+    except Exception:
+        pts = []
+    _EX_KL[key] = (pts, now, minutes)
+    return pts
+
+
+_EX_KL_OK = ("bybit", "binance", "gate", "bitget", "okx")   # биржи с подключённой историей свечей
+
+
 def _mexc_deals(sym: str) -> list:
     raw = _MEXC_SESS.get(f"{MEXC_BASE}/contract/deals/{sym}", timeout=8).json().get("data") or []
     out = []
@@ -1543,8 +1587,8 @@ def _dex_resolve(base, ca=None):
             px = _ff(p.get("priceUsd")); liq = _ff((p.get("liquidity") or {}).get("usd"))
             if px > 0 and liq >= 25000 and _dex_vol(p) >= _DEX_MIN_VOL and not _dex_fake(liq, _dex_vol(p)):
                 cand.append((p, px, liq))         # мимо: тонкие (<$25k), мёртвые (<$20k), и ФЕЙКОВЫЕ (огромная ликв.+нулевой оборот = тёзка)
-        if ref and cand:                          # у настоящей монеты цена DEX≈цене биржи → двойники отсекаются ценой
-            cand = [c for c in cand if 0.88 <= c[1] / ref <= 1.12]     # ТОЛЬКО ±~12%: реальный арбитраж MEXC↔DEX тут, шире = обёрнутый пул-тёзка
+        if ref and cand:                          # у настоящей монеты цена DEX близка к бирже; тёзки-коллизии обычно 2x+ мимо
+            cand = [c for c in cand if 0.7 <= c[1] / ref <= 1.43]      # ±~30-43%: НЕ режем памп-дамп (DEX разъезжается на 20-40% — это и есть сигнал), но 2x+ тёзки отсекаем
         elif not ref:                             # нет цены с биржи (не знаем ref) — не рискуем, только по CA
             cand = []
         best = max(cand, key=lambda c: _dex_vol(c[0]), default=None)   # пул с МАКС. объёмом 24ч — живая цена (как друг)
@@ -1605,10 +1649,10 @@ def _dex_ohlc(base: str, minutes: int) -> list:
                 if cl > 0 and o > 0:
                     bars.append([int(x[0]), o, h, l, cl])
         bars.sort()
-        live = _dex_price(base)                   # привязка к правде Dexscreener: если GT даёт иной масштаб — подгоняем ВСЕ o/h/l/c
+        live = _dex_price(base)                   # привязка к правде Dexscreener: подгоняем ВСЕ o/h/l/c к единому масштабу (тот же якорь, что у сделок _dex_trades и живого хвоста)
         if live > 0 and bars and bars[-1][4] > 0:
             f = live / bars[-1][4]
-            if f < 0.98 or f > 1.02:              # масштаб/сторона GT разошлись с живой ценой >2% → выравниваем всю историю к правде Dexscreener
+            if f < 0.999 or f > 1.001:            # БЕЗ гистерезиса 2%: свечи (старая история) и сделки/хвост (недавнее окно) должны сходиться в одной точке, иначе на стыке ступенька
                 bars = [[t, o * f, h * f, l * f, cl * f] for t, o, h, l, cl in bars]
     except Exception:
         bars = []
@@ -1661,8 +1705,8 @@ def _dex_trades(base: str) -> list:
         pts.sort()
         live = _dex_price(base)                   # выравнивание масштаба к правде Dexscreener
         if live > 0 and pts and pts[-1][1] > 0:
-            f = live / pts[-1][1]
-            if f < 0.9 or f > 1.1:
+            f = live / pts[-1][1]                 # ВСЕГДА якорим последний своп к живой цене Dexscreener (единый масштаб со снапшот-хвостом ingest и свечами).
+            if f < 0.999 or f > 1.001:            # БЕЗ гистерезиса 10%: иначе на стыке «сделки↔живой хвост» постоянная ступенька и щелчок всего окна каждые ~2с при переседе
                 pts = [[s, p * f] for s, p in pts]
     except Exception:
         pts = []
@@ -1684,9 +1728,9 @@ def _dex_price(base):
     return 0.0
 
 
-_DEX_POLL_CAP = 120                                  # потолок постоянного опроса вотчлиста (лимит Dexscreener)
-_DEX_SLOW_BATCH = 24                                 # монет вотчлиста за один проход (ротацией) — проход ~12с, вся сотня освежается за ~5 проходов (<90с гарда)
-_DEX_FRESH_SEC = 90                                  # старше — цена DEX считается протухшей (не берём в спред-коллы)
+_DEX_POLL_CAP = 400                                  # потолок опроса вотчлиста (БАТЧ Dexscreener 30 пар/запрос → охват втрое больше, ловим LINEA-подобные)
+_DEX_SLOW_BATCH = 120                                # монет вотчлиста за проход (батчами по 30/сеть) — весь вотчлист освежается за ~3-4 прохода
+_DEX_FRESH_SEC = 180                                 # старше — цена DEX протухла. 180с: пул торгуется реже раз/90с, но цена валидна (не выбрасываем реальные спреды)
 _dex_slow_off = 0                                    # смещение ротации медленного ряда
 
 
@@ -1721,21 +1765,37 @@ def _dex_poll():
                 with mh["lock"]:
                     ms = mh["hist"][-1][1] if mh["hist"] else {}
                 mx_last = {s.replace("_USDT", ""): v[3] for s, v in ms.items() if v and v[3]}
+            groups = {}                                              # chain -> [(base, pair_lower)] для БАТЧ-опроса (30 пар/запрос)
             for b in bases:
                 m = _DEX_MAP.get(b)
                 if m is None:
-                    _dex_resolve(b); time.sleep(0.3); m = _DEX_MAP.get(b)
-                if not isinstance(m, dict) or m.get("skip") or not m.get("pair"):
-                    continue                                          # нечего качать — без сетевого запроса и без паузы
-                px = _dex_price(b)
-                if px:
-                    ml = mx_last.get(b)                               # ЖИВОЙ гард тёзки: DEX уехал >15% от MEXC → пул неверный, выкинуть
-                    if ml and ml > 0 and (px / ml > 1.15 or px / ml < 0.87):
-                        _DEX_REF[b] = ml; _DEX_MAP[b] = {"skip": True}
-                        _DEX_TS.pop(b, None); snap.pop(b, None); _dex_save_map()
-                    else:
-                        snap[b] = px; _DEX_TS[b] = time.time()        # отметка свежести (для гарда актуальности)
-                time.sleep(0.3)
+                    _dex_resolve(b); m = _DEX_MAP.get(b)
+                if not isinstance(m, dict) or m.get("skip") or not m.get("pair") or not m.get("chain"):
+                    continue
+                groups.setdefault(m["chain"], []).append((b, m["pair"].lower()))
+            for chain, lst in groups.items():
+                for i in range(0, len(lst), 30):                     # Dexscreener: до 30 пар одним запросом
+                    chunk = lst[i:i + 30]
+                    try:
+                        pairs = ",".join(p for _, p in chunk)
+                        js = _get(f"https://api.dexscreener.com/latest/dex/pairs/{chain}/{pairs}", timeout=10).json()
+                        arr = js.get("pairs") or ([js.get("pair")] if js.get("pair") else [])
+                        bypair = {(p.get("pairAddress") or "").lower(): _ff(p.get("priceUsd")) for p in arr if p}
+                        for b, pr in chunk:
+                            px = bypair.get(pr) or 0.0
+                            if px <= 0:
+                                continue
+                            ml = mx_last.get(b)                       # гард тёзки СМЯГЧЁН: только >2.5x мимо = точно чужой токен → пул навсегда skip
+                            if ml and ml > 0 and (px / ml > 2.5 or px / ml < 0.4):
+                                _DEX_REF[b] = ml; _DEX_MAP[b] = {"skip": True}
+                                _DEX_TS.pop(b, None); snap.pop(b, None); _dex_save_map()
+                            elif ml and ml > 0 and (px / ml > 1.6 or px / ml < 0.62):
+                                pass                                  # 60%..2.5x — подозрительно (возможно памп ИЛИ полу-тёзка): не записываем ЭТО чтение, но пул НЕ убиваем (памп-дамп не теряем)
+                            else:
+                                snap[b] = px; _DEX_TS[b] = time.time()   # отметка свежести
+                    except Exception:
+                        pass
+                    time.sleep(0.4)
             with _DEX["lock"]:
                 _DEX["hist"].append((time.time(), snap))
         except Exception:
@@ -2926,6 +2986,18 @@ class Handler(BaseHTTPRequestHandler):
             elif route == "/api/dextrades":                      # ПОСВОПОВАЯ цена DEX (каждая сделка) → детальная линия
                 syms = [s.strip().upper() for s in (qs.get("symbols") or [""])[0].split(",") if s.strip()][:12]
                 self._json({"ok": True, "trades": {s: _dex_trades(s.replace("_USDT", "")) for s in syms}})
+            elif route == "/api/exkline":                        # свечи ДРУГИХ бирж (полная история линии) → {sym:{ex:[[t,c]]}}
+                syms = [s.strip().upper() for s in (qs.get("symbols") or [""])[0].split(",") if s.strip()][:12]
+                exs = [e.strip().lower() for e in (qs.get("exs") or [""])[0].split(",") if e.strip() in _EX_KL_OK][:6]
+                try:
+                    minutes = max(30, min(1440, int((qs.get("minutes") or ["240"])[0])))
+                except (TypeError, ValueError):
+                    minutes = 240
+                out = {}
+                for s in syms:
+                    b = s.replace("_USDT", "")
+                    out[s] = {e: _ex_kline(e, b, minutes) for e in exs}
+                self._json({"ok": True, "kline": out})
             elif route == "/api/pxhist":                         # ПЛОТНАЯ посекундная история цен (MEXC/DEX/fair) для панели
                 syms = [s.strip().upper() for s in (qs.get("symbols") or [""])[0].split(",") if s.strip()][:12]
                 try:

@@ -135,7 +135,7 @@
     const st = g("mxstat");
     try {
       s.classList.remove("hidden"); s.style.display = "";
-      const hh = s.querySelector(".mxseth"); if (hh && hh.childNodes[0]) hh.childNodes[0].nodeValue = "Настройки сетки · v232  ";   // видно версию при открытии
+      const hh = s.querySelector(".mxseth"); if (hh && hh.childNodes[0]) hh.childNodes[0].nodeValue = "Настройки сетки · v234  ";   // видно версию при открытии
       s.onmousedown = (e) => e.stopPropagation();     // не отдавать mousedown драгу окна — иначе клики внутри «съедаются»
       const xb = g("mxset-x"); if (xb) { xb.onmousedown = (e) => { e.preventDefault(); e.stopPropagation(); closeSettings(); }; xb.onclick = closeSettings; }
       document.addEventListener("keydown", onSetKey);
@@ -377,6 +377,21 @@
       for (const sym in (r.trades || {})) { const pts = r.trades[sym]; if (pts && pts.length) pxSeed(sym + "::dex", pts); }
     } catch (e) {}
   }
+  const KLINE_EX = ["bybit", "binance", "gate", "bitget", "okx"];         // биржи с подключённой историей свечей (полная линия слева)
+  // ПОЛНАЯ ИСТОРИЯ ДРУГИХ БИРЖ: свечи каждой биржи → префикс к линии (как у MEXC), чтобы график был не с середины
+  async function exKlineSeed(syms) {
+    const exset = {};                                                    // какие биржи показываем (тумблеры + пары монет) и умеем их свечи
+    for (const e of CFG.ex) if (KLINE_EX.indexOf(e) >= 0) exset[e] = 1;
+    for (const s of syms) { const cf = CELLFEEDS[s]; if (cf) for (const e of cf) if (KLINE_EX.indexOf(e) >= 0) exset[e] = 1; }
+    const exs = Object.keys(exset); if (!exs.length) return;
+    const minutes = Math.min(1440, Math.max(60, Math.ceil(maxWin() / 60) + 10));
+    try { const r = await fetch("/api/exkline?minutes=" + minutes + "&exs=" + exs.join(",") + "&symbols=" + encodeURIComponent(syms.join(","))).then((x) => x.json());
+      if (!r || !r.ok) return;
+      for (const sym in (r.kline || {})) { const byex = r.kline[sym] || {};
+        for (const ex in byex) { const pts = byex[ex]; if (pts && pts.length) seedBuf(sym + "::" + ex, pts); }   // префикс истории (не трогает живой хвост)
+      }
+    } catch (e) {}
+  }
   // плотная посекундная история: заменяет её окном [t0..t1] буфера (per-second ПОБЕЖДАЕТ грубые свечи в этом диапазоне),
   // сохраняя грубую историю СТАРШЕ t0 (fallback за пределами рекордера) и живой хвост НОВЕЕ t1
   function pxSeed(key, pts) {
@@ -445,10 +460,10 @@
       }
       // МГНОВЕННЫЙ сид: новая монета или окно расширили → тянем ВСЮ историю СРАЗУ (не ждать циклов) — быстрый прогруз 1в1
       const deep = need.filter((s) => !(SEEDED[s] >= winOf(s)));
-      if (deep.length) { for (const s of deep) SEEDED[s] = winOf(s); pxHistSeed(deep); klineSeed(deep); dexKlineSeed(deep); dexTradesSeed(deep); }
+      if (deep.length) { for (const s of deep) SEEDED[s] = winOf(s); pxHistSeed(deep); klineSeed(deep); dexKlineSeed(deep); dexTradesSeed(deep); exKlineSeed(deep); }
       if (_pc % 3 === 0) { pxHistSeed(need); }                         // ПЛОТНАЯ посекундная история MEXC/fair (свежая, часто)
       if (_pc % 2 === 0) { dexTradesSeed(need); }                      // ПОСВОПОВАЯ линия DEX — часто, каждое движение пула
-      if (_pc % 8 === 2) { klineSeed(need); dexKlineSeed(need); }      // грубые свечи — только как fallback СТАРШЕ рекордера/сделок
+      if (_pc % 8 === 2) { klineSeed(need); dexKlineSeed(need); exKlineSeed(need); }   // свечи MEXC/DEX/ДРУГИХ бирж — полная история слева (fallback старше рекордера)
     }
     // на каких биржах есть монета — для бейджей (ячейки + лента + закреп), кэшируется
     const wsy = need.slice(); for (const ev of FEEDLOG.slice(0, 30)) if (wsy.indexOf(ev.sym) < 0) wsy.push(ev.sym);
@@ -484,7 +499,7 @@
     const med = lastsA.length ? lastsA.map((z) => z[1]).sort((a, b) => a - b)[Math.floor(lastsA.length / 2)] : 0;
     let lines = allLines;
     if (allLines.length > 2 && med > 0) {
-      const kept = allLines.filter((id) => { const v = BUF[sym + "::" + id], p = v[v.length - 1][1]; return p > 0 && p / med <= 5 && med / p <= 5; });
+      const kept = allLines.filter((id) => { if (id === "dex" || id.endsWith("fair")) return true; const v = BUF[sym + "::" + id], p = v[v.length - 1][1]; return p > 0 && p / med <= 5 && med / p <= 5; });   // dex/справедливые не режем как коллизию — своя природа/лаг (dex может законно разъехаться на пампе)
       if (kept.length >= 2) lines = kept;
     }
     for (const f of allLines) if (f.endsWith("fair") && lines.indexOf(f) < 0) lines.push(f);   // справедливые не режем фильтром коллизий
@@ -615,13 +630,13 @@
   // ── окно ──
   // подготовить контент панели (наполнить сетку/панели) — вызывается и при загрузке, и при открытии
   function ensure() {
-    const stv = g("mxstat"); if (stv) { stv.textContent = "v232"; stv.style.color = "#6b7280"; }
+    const stv = g("mxstat"); if (stv) { stv.textContent = "v234"; stv.style.color = "#6b7280"; }
     try {
       if (!CFG.cards || !CFG.cards.length) { CFG.cards = DEF.cards.slice(); save(); }
       renderBar(); renderZoom(); renderGrid(); loadSyms();
       const sb = g("mxsound"); if (sb) sb.classList.toggle("on", CFG.sound);
       const th = g("mxthresh"); if (th) th.value = CFG.thresh;
-    } catch (e) { if (stv) { stv.textContent = "v232 ОШИБКА: " + (e && e.message || e); stv.style.color = "#ef5f5a"; } }
+    } catch (e) { if (stv) { stv.textContent = "v234 ОШИБКА: " + (e && e.message || e); stv.style.color = "#ef5f5a"; } }
   }
   function open() {
     const w = win(); if (!w) return;

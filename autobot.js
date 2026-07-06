@@ -22,14 +22,18 @@
   const AB = {
     on: false,
     cfg: {
-      sizeUsd: 20,       // размер лота (виртуальный), $
+      sizeUsd: 20,       // размер лота в $ (режим "usd")
+      sizeMode: "usd",   // "usd" = задаём в долларах (бот пересчитает в контракты) / "contracts" = РОВНО N контрактов (фикс)
+      sizeContracts: 1,  // размер лота в контрактах (режим "contracts") — сколько ровно ставим
       profitTicks: 2,    // тейк, тиков (тренд/поджатие)
       gateTicks: 3,      // не собирать спред у середины/стены, пока спред уже этого
       stopTicks: 8,      // аварийный стоп: убыток ≥ N тиков → закрыть по рынку
       maxHoldSec: 25,    // не пересиживать: закрыть по рынку через N сек
       aheadTicks: 1,     // «чуть раньше» ММ (поджатие): агрессивнее середины на N тиков
       deepTicks: 12,     // как глубоко искать дальнюю стену (прострел)
-      scanTicks: 60,     // окно сканирования стен от спреда, тиков (чтобы доставать жирные маркетосы, не только у мид)
+      scanTicks: 60,     // окно сканирования стен от спреда, тиков (минимум; на мелко-тиковых монетах перекрывается % полосой)
+      scanPct: 1.5,      // окно сканирования = максимум(scanTicks, эта доля % от цены) — на ALLO/микро-тик тик крохотный, стены далеко в тиках
+      scanMaxTicks: 2000,// потолок окна в тиках (чтобы не сканировать весь стакан)
       wallMinUsd: 300,   // стена меньше этого ($) не считается стеной — от неё спред не собираем
       fixUsd: 0,         // (УДАЛЕНО из UI) легаси-поле: перебивало «Размер лота» и путало. Гасится миграцией в loadState, размер ТОЛЬКО из sizeUsd.
       wallFrac: 0.3,     // (устар.) доля ликвидности окна
@@ -111,20 +115,33 @@
   const snap = (p) => +(Math.round(p / tk()) * tk()).toFixed(dc());
   const now = () => (S.flow && S.flow.now ? S.flow.now : Date.now());
   const cs = () => S.contractSize || 1;
-  function vol(price) { const usd = AB.cfg.sizeUsd || 1; return Math.max(1, Math.round(usd / (price * cs()))); }
-  function lotUsd(price) { return AB.cfg.sizeUsd || 1; }  // notional одного лота (для порогов накопления)
-  // Мин. ордер биржи = 1 контракт. Если 1 контракт дороже лота — торговать эту монету этим лотом НЕЛЬЗЯ.
+  const inContracts = () => AB.cfg.sizeMode === "contracts";
+  // Кол-во контрактов ордера. Режим "contracts" = РОВНО столько (фикс, без пересчёта). Режим "usd" = из $ / цена.
+  function vol(price) {
+    if (inContracts()) return Math.max(1, Math.round(AB.cfg.sizeContracts || 1));
+    const usd = AB.cfg.sizeUsd || 1; return Math.max(1, Math.round(usd / (price * cs())));
+  }
+  function lotUsd(price) {  // notional одного лота (для порогов накопления)
+    const px = price || S.bestBid || S.bestAsk || 0;
+    if (inContracts()) return Math.max(1, Math.round(AB.cfg.sizeContracts || 1)) * px * cs();
+    return AB.cfg.sizeUsd || 1;
+  }
+  // Мин. ордер биржи = 1 контракт. Блокируем ТОЛЬКО в режиме $ (там микро-лот может не покрыть 1 контракт). В режиме контрактов — 1 контракт всегда валиден.
   function minContractUsd() { const px = S.bestBid || S.bestAsk || 0; return px * cs(); }
-  function lotTooSmall() { const mc = minContractUsd(); return mc > 0 && (AB.cfg.sizeUsd || 0) < mc * 0.99; }
-  // Читаемый размер ордера: в $ И в контрактах (1 контракт монеты часто = N монет → число контрактов большое при микро-$).
+  function lotTooSmall() { if (inContracts()) return false; const mc = minContractUsd(); return mc > 0 && (AB.cfg.sizeUsd || 0) < mc * 0.99; }
+  // Читаемый размер ордера: в $ И в контрактах.
   function sizeReadout() {
     const px = S.bestBid || S.bestAsk || 0, coin = (S.symbol || "").replace("_USDT", "");
+    const csn = cs() > 1 ? ` · 1 контр=${cs()} ${coin}` : "";
+    if (inContracts()) {
+      const ctr = Math.max(1, Math.round(AB.cfg.sizeContracts || 1));
+      return px ? `📦 ордер: ${ctr} контр. (фикс) = $${Math.round(ctr * px * cs())}${csn}` : `📦 ордер: ${ctr} контр. (фикс)`;
+    }
     const usd = AB.cfg.sizeUsd || 0;
     if (!px) return `💵 ордер: $${usd}`;
     const mc = minContractUsd();
-    if (lotTooSmall()) return `⛔ 1 контракт = $${Math.round(mc)} (${cs()} ${coin}) > твой лот $${usd} — НЕ ТОРГУЮ. Подними лот ≥ $${Math.ceil(mc)} или возьми монету дешевле`;
+    if (lotTooSmall()) return `⛔ 1 контракт = $${Math.round(mc)} (${cs()} ${coin}) > твой лот $${usd} — НЕ ТОРГУЮ. Подними лот ≥ $${Math.ceil(mc)}, монету дешевле, или переключи на «контр.»`;
     const ctr = Math.max(1, Math.round(usd / (px * cs())));
-    const csn = cs() > 1 ? ` · 1 контр=${cs()} ${coin}` : "";
     return `💵 ордер: $${usd} ≈ ${ctr} контр. = $${Math.round(ctr * px * cs())}${csn}`;
   }
   function pnlUsd(long, entry, exit, v) { return (long ? exit - entry : entry - exit) * v * cs(); }
@@ -221,9 +238,12 @@
   //  traded = сколько $ проторговано СКВОЗЬ бакеты кластера с прошлого шага (для айсберга).
   function updateWallsSide(side, tradedMap) {
     const d = S.depth; if (!d) return [];
-    const t = tk(), C = AB.cfg, scan = Math.max(C.deepTicks || 12, C.scanTicks || 60);
+    const t = tk(), C = AB.cfg;
     const arr = side === "buy" ? d.bids : d.asks, best = side === "buy" ? S.bestBid : S.bestAsk;
     if (!arr || !best) return [];
+    // окно = максимум(фикс. тики, % от цены), с потолком. На мелко-тиковых монетах (ALLO tick 1e-5) стены далеко в тиках.
+    const bandTicks = t > 0 ? Math.round((best * (C.scanPct || 1.5) / 100) / t) : 0;
+    const scan = Math.min(C.scanMaxTicks || 2000, Math.max(C.deepTicks || 12, C.scanTicks || 60, bandTicks));
     // 1) уровни в окне
     const lv = [];
     for (const [p, v] of arr) {
@@ -346,11 +366,17 @@
   function pickWall(side) {
     const walls = side === "buy" ? (AB._wallsBuy || []) : (AB._wallsSell || []);
     const C = AB.cfg, minUsd = C.wallMinUsd > 0 ? C.wallMinUsd : 0;
-    let cand = walls.filter((w) => (w.cls === "confirmed" || w.cls === "defended") && w.peakUsd >= minUsd);
+    // нестрогий режим (gateEnable=off): достаточно даже подтверждающейся стены; строгий — только confirmed/defended
+    const okCls = C.gateEnable ? ["confirmed", "defended"] : ["confirming", "confirmed", "defended"];
+    let cand = walls.filter((w) => okCls.indexOf(w.cls) >= 0 && w.peakUsd >= minUsd);
     if (!cand.length) return null;
-    const abs = absorbing(side);
-    cand = cand.filter((w) => w.cls === "defended" || abs);   // защищённая (айсберг/долив) годна всегда; обычная — только при absorption
-    if (!cand.length) return null;
+    // СТРОГИЙ режим: обычную стену берём только при живой absorption; защищённую — всегда.
+    // НЕСТРОГИЙ: absorption НЕ требуем — ставим лимитку у стены сразу (как раньше, чтобы можно было заходить).
+    if (C.gateEnable) {
+      const abs = absorbing(side);
+      cand = cand.filter((w) => w.cls === "defended" || abs);
+      if (!cand.length) return null;
+    }
     if (C.wallMode === "near") return cand.reduce((a, b) => (b.offT < a.offT ? b : a));
     return cand.reduce((a, b) => (b.peakUsd > a.peakUsd ? b : a));   // самый жирный маркетос
   }
@@ -845,14 +871,16 @@
         <div class="ab-row"><button id="ab-connsave">Сохранить ключ</button><span id="ab-connstat"></span></div>
       </div>
 
-      <div class="ab-row"><label>Размер лота, $</label><input type="number" id="ab-size" step="1"></div>
+      <div class="ab-ct" id="ab-sizemode"><button data-sm="usd">💵 В долларах</button><button data-sm="contracts">📦 В контрактах</button></div>
+      <div class="ab-row"><label id="ab-sizelbl">Размер лота, $</label><input type="number" id="ab-size" step="1"></div>
       <div class="ab-row"><label>🧱 Стена ММ, $ <span class="ab-sub">задаёшь ты</span></label><input type="number" id="ab-wallusd" step="50"></div>
       <div class="ab-crow"><button id="ab-wallpull">↧ из стакана</button></div>
       <div class="ab-note" id="ab-wallinfo" style="color:#e6c34a">🧱 стена ММ: —</div>
       <div class="ab-ct" id="ab-wallmode"><button data-wm="biggest">🏆 Крупнейшая</button><button data-wm="near">📎 Ближняя</button></div>
       <div class="ab-note" id="ab-fixinfo" style="color:#7fd0ff">💵 ордер: —</div>
       <label class="ab-autochk"><input type="checkbox" id="ab-two"> ⇅ <b>Обе стороны</b> <span class="ab-sub">(лимитки сверху и снизу)</span></label>
-      <label class="ab-autochk"><input type="checkbox" id="ab-auto"> 🎯 <b>Авто под монету</b> <span class="ab-sub">(гейт/тейк/стоп)</span></label>
+      <label class="ab-autochk"><input type="checkbox" id="ab-strict"> 🎯 <b>Строгий режим</b> <span class="ab-sub">(ждать absorption; выкл = ставить у стены сразу)</span></label>
+      <label class="ab-autochk"><input type="checkbox" id="ab-auto"> ⚙ <b>Авто под монету</b> <span class="ab-sub">(гейт/тейк/стоп)</span></label>
       <div id="ab-autoline" class="ab-strat">—</div>
       <div class="ab-sec ab-cl" data-box="ab-manual">▸ Ручная настройка</div>
       <div id="ab-manual" style="display:none">
@@ -931,9 +959,32 @@
   }
 
   function wireWindow(w) {
-    ["size:sizeUsd", "profit:profitTicks", "gate:gateTicks", "stop:stopTicks", "hold:maxHoldSec",
+    ["profit:profitTicks", "gate:gateTicks", "stop:stopTicks", "hold:maxHoldSec",
      "ahead:aheadTicks", "deep:deepTicks", "wallfrac:wallFrac", "tpfrac:tpFrac", "tsec:trendSec", "tticks:trendTicks", "pull:pullbackTicks"]
       .forEach((s) => { const [id, key] = s.split(":"); bindNum("ab-" + id, key); });
+
+    // ── РАЗМЕР: режим $ / контракты + поле, которое пишет в нужный cfg ──
+    const sizeEl = w.querySelector("#ab-size"), sizeLbl = w.querySelector("#ab-sizelbl"), smBox = w.querySelector("#ab-sizemode");
+    const sizeRender = () => {
+      if (sizeLbl) sizeLbl.textContent = inContracts() ? "Размер лота, контр." : "Размер лота, $";
+      if (sizeEl) { sizeEl.step = inContracts() ? "1" : "1"; sizeEl.value = inContracts() ? (AB.cfg.sizeContracts || 1) : (AB.cfg.sizeUsd || 0); }
+      if (smBox) smBox.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.sm === (AB.cfg.sizeMode || "usd")));
+      const fi = document.getElementById("ab-fixinfo"); if (fi) fi.textContent = sizeReadout();
+    };
+    if (sizeEl) sizeEl.onchange = () => {
+      const v = parseFloat(sizeEl.value); if (isNaN(v) || v <= 0) return;
+      if (inContracts()) AB.cfg.sizeContracts = Math.max(1, Math.round(v)); else AB.cfg.sizeUsd = v;
+      saveState(); sizeRender();
+    };
+    if (smBox) smBox.querySelectorAll("button").forEach((b) => b.onclick = () => {
+      AB.cfg.sizeMode = b.dataset.sm; saveState(); sizeRender();
+      abLog(inContracts() ? `режим размера: 📦 ${AB.cfg.sizeContracts} контр. (фикс)` : `режим размера: 💵 $${AB.cfg.sizeUsd}`);
+    });
+    sizeRender();
+
+    // ── СТРОГИЙ РЕЖИМ (gateEnable): вкл = ждать absorption; выкл = ставить у стены сразу ──
+    const strictEl = w.querySelector("#ab-strict");
+    if (strictEl) { strictEl.checked = AB.cfg.gateEnable !== false; strictEl.onchange = () => { AB.cfg.gateEnable = strictEl.checked; saveState(); abLog(strictEl.checked ? "строгий режим ВКЛ (жду absorption)" : "строгий режим ВЫКЛ (ставлю у стены сразу)"); }; }
 
     // поле стены ММ (задаёт Вика; ручной ввод → авто-синк из стакана отключается)
     const wu = w.querySelector("#ab-wallusd");

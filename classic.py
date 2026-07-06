@@ -26,6 +26,8 @@ CFG = {
     "natr_min": 0.5,        # мин. NATR(14), % — отсекаем «мёртвые» монеты без движения
     "rel_vol_min": 1.4,     # «в игре»: относит.объём (новые деньги) ≥ N× фона, иначе мёртвый актив
     "min_grade": "УРОВЕНЬ", # слать сигналы не слабее: ХАЙ / УРОВЕНЬ / СЕТАП (ТС: ХАЙ=слабо, не шлём)
+    "top_movers": True,     # сканировать ТОЛЬКО топ роста/падения дня (по |24ч изменению|) — правило Вики
+    "btc_context": True,    # треугольник (ТС5/6) валиден только если BTC в ту же сторону (правило ТС)
 }
 _GRADE_RANK = {"ХАЙ": 0, "УРОВЕНЬ": 1, "СЕТАП": 2}
 _TF_SEC = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800}
@@ -73,14 +75,24 @@ def _get(url: str, timeout: int = 15):
 
 
 def _top_symbols() -> list:
-    """USDT-перпы Binance с ОБЪЁМОМ ЗА 24Ч ≥ порога (min24hvol), сорт по объёму, потолок topn."""
+    """Кандидаты Binance: объём24ч ≥ min24hvol, и (правило Вики) ТОП РОСТА/ПАДЕНИЯ дня по |24ч изменению|."""
     tick = _get(FAPI + "/fapi/v1/ticker/24hr", timeout=20)
     floor = float(CFG["min24hvol"])
-    rows = [(t["symbol"], float(t.get("quoteVolume") or 0.0)) for t in tick
-            if isinstance(t, dict) and (t.get("symbol") or "").endswith("USDT")]
-    rows = [r for r in rows if r[1] >= floor]     # фильтр по 24ч объёму (то, что просила Вика)
-    rows.sort(key=lambda x: -x[1])
-    return [s for s, _ in rows[: int(CFG["topn"])]]
+    rows = []
+    for t in tick:
+        s = t.get("symbol") if isinstance(t, dict) else None
+        if not s or not s.endswith("USDT"):
+            continue
+        qv = float(t.get("quoteVolume") or 0.0)
+        if qv < floor:
+            continue
+        chg = abs(float(t.get("priceChangePercent") or 0.0))   # |изменение за 24ч|, % (рост ИЛИ падение)
+        rows.append((s, qv, chg))
+    if CFG.get("top_movers", True):
+        rows.sort(key=lambda x: -x[2])            # топ движения дня — «монета в игре / новые деньги»
+    else:
+        rows.sort(key=lambda x: -x[1])            # иначе просто топ по обороту
+    return [s for s, _, _ in rows[: int(CFG["topn"])]]
 
 
 def _klines(sym: str, interval: str = "5m", limit: int = 180) -> list:
@@ -166,6 +178,85 @@ def _grade(bars: list, lvl: float, natr: float, touches: int) -> tuple:
     return ("ХАЙ", cons)
 
 
+# ── КЛАССИФИКАЦИЯ по 6 стратегиям ТАЙП (ТС №1-6): формация + контекст → strat ──
+def _prior_move(bars: list, lookback: int = 45, upto: int = 8) -> float:
+    """Ход цены ДО последних `upto` свечей — контекст (был ли большой тренд/падение до формации)."""
+    if len(bars) < lookback:
+        seg = bars[:-upto] if len(bars) > upto + 3 else bars
+    else:
+        seg = bars[-lookback:-upto]
+    if len(seg) < 5 or seg[0][1] <= 0:
+        return 0.0
+    return (seg[-1][4] - seg[0][1]) / seg[0][1]
+
+
+def _classify_long(bars: list, relv: float) -> str:
+    """ТС1 Global Long (аномальный объём + крупный прежний рост = ступени) vs ТС2 Local Long (локальный)."""
+    prior = _prior_move(bars)
+    if relv >= 3.0 and prior > 0.10:            # деньги вошли сильно + уже большой ход = глобальный тренд
+        return "ТС№1 Global Long"
+    return "ТС№2 Local Long"
+
+
+def _hook_target(bars: list, lvl: float) -> float:
+    """ТС4 Hook: после ЗАТЯЖНОГО ПАДЕНИЯ пробой вверх. Цель = 25% амплитуды падения (правило ТС). 0=не крючок."""
+    if len(bars) < 60:
+        return 0.0
+    earlier_hi = max(b[2] for b in bars[-60:-18])
+    recent_lo = min(b[3] for b in bars[-22:])
+    if earlier_hi <= 0:
+        return 0.0
+    drop = (earlier_hi - recent_lo) / earlier_hi
+    if drop < 0.06 or lvl < recent_lo * 0.999:  # нужно заметное падение и уровень у дна
+        return 0.0
+    return lvl * (1 + drop * 0.25)              # тейк = четверть падения (технический отскок)
+
+
+def _triangle(lines: list, bars: list) -> dict:
+    """Треугольник = верхняя НИСХОДЯЩАЯ (по хаям) + нижняя ВОСХОДЯЩАЯ (по лоям), сходятся. None если нет."""
+    downs = [t for t in lines if t["down"] and t["touches"] >= 3]
+    ups = [t for t in lines if not t["down"] and t["touches"] >= 3]
+    if not downs or not ups:
+        return None
+    u, l = downs[0], ups[0]                     # верхняя и нижняя границы
+    i = len(bars) - 1
+    vu = u["p1"] + u["slope"] * (i - u["i1"])   # верхняя граница сейчас
+    vl = l["p1"] + l["slope"] * (i - l["i1"])   # нижняя граница сейчас
+    if vu <= vl:                                 # уже сошлись/перехлест — не треугольник
+        return None
+    return {"up": u, "lo": l, "vu": vu, "vl": vl}
+
+
+def _false_breakout(bars: list, lvl: float, long: bool, look: int = 6) -> bool:
+    """Ложный вынос ПЕРЕД пробоем (усилитель уверенности ТС5/6): недавно прокололи В ДРУГУЮ сторону и вернулись."""
+    if len(bars) < look + 2:
+        return False
+    win = bars[-(look + 1):-1]
+    if long:                                     # перед лонг-пробоем был ложный слом ВНИЗ
+        return any(b[3] < lvl * 0.997 and b[4] > lvl * 0.999 for b in win)
+    return any(b[2] > lvl * 1.003 and b[4] < lvl * 1.001 for b in win)  # перед шорт был закол ВВЕРХ
+
+
+_BTC = {"ts": 0.0, "trend": 0}
+
+
+def _btc_trend() -> int:
+    """Тренд BTC за ~сутки (1ч): +1 растёт / -1 падает / 0 флэт. Контекст для треугольников (ТС5/6)."""
+    now = time.time()
+    if now - _BTC["ts"] < 300:
+        return _BTC["trend"]
+    try:
+        d = _get(FAPI + "/fapi/v1/klines?symbol=BTCUSDT&interval=1h&limit=30")
+        cl = [float(k[4]) for k in d if isinstance(k, list) and len(k) >= 5]
+        if len(cl) >= 25:
+            chg = (cl[-1] - cl[-24]) / cl[-24] if cl[-24] else 0.0
+            _BTC["trend"] = 1 if chg > 0.005 else (-1 if chg < -0.005 else 0)
+            _BTC["ts"] = now
+    except Exception:
+        pass
+    return _BTC["trend"]
+
+
 # ─────────────────────────── движок формаций ───────────────────────────
 def _swings(bars: list, k: int = 2) -> tuple:
     """Свинг-хаи/лои (фрактал k соседей) → ([(i,price)высокие], [(i,price)низкие])."""
@@ -240,6 +331,20 @@ def _zone(bars: list, price: float) -> str:
             "зона 3" if pos >= 0.75 else "зона 4 (середина)" if pos >= 0.2 else "зона 5 (у лоя)")
 
 
+def _recent_levels(bars: list, tol: float, win: int = 34) -> tuple:
+    """Уровни ТЕКУЩЕГО поджатия (метод Вики): свинги последних `win` свечей → СВЕЖИЕ чистые уровни,
+    а не старьё по всей истории. Индексы касаний — в координатах полного bars (для проверки свежести)."""
+    n = len(bars)
+    off = max(0, n - 1 - win)
+    seg = bars[off:n - 1]                                 # окно ДО пробойной свечи
+    if len(seg) < 8:
+        return [], []
+    sh, sl = _swings(seg)
+    sh = [(i + off, p) for i, p in sh]                    # сдвиг индексов в полную шкалу
+    sl = [(i + off, p) for i, p in sl]
+    return _levels(sh, tol), _levels(sl, tol)
+
+
 def _next_level(levels: list, price: float, long: bool, natr: float) -> float:
     """ТЕЙК = следующий КРУПНЫЙ уровень по направлению (без урезания 3% — как в сделках Вики).
     Нет уровня → цель по волатильности (мин. 5%, либо 4×NATR — ловим памп)."""
@@ -256,13 +361,16 @@ def _next_level(levels: list, price: float, long: bool, natr: float) -> float:
     return price * (1 + frac) if long else price * (1 - frac)
 
 
-def _mk_alert(sym, direction, kind, lvl, bars, levels, tf, natr, extra=None, grade=None, relv=None):
+def _mk_alert(sym, direction, kind, lvl, bars, levels, tf, natr, extra=None, grade=None, relv=None,
+             strat=None, take=None):
     """Карточка алерта: формация + ТВХ/СТОП/ТЕЙК по правилам ТС (стоп 0.2-0.3 от уровня → б/у)."""
     last = bars[-1]; long = direction == "LONG"
     tvx = lvl                                            # ТВХ = уровень (ретест после пробоя)
     stop = lvl * (1 - 0.0025) if long else lvl * (1 + 0.0025)
-    take = _next_level(levels, last[4], long, natr)
-    a = {"sym": sym, "dir": direction, "kind": kind, "tf": tf, "level": lvl, "tvx": tvx, "stop": stop,
+    if take is None:
+        take = _next_level(levels, last[4], long, natr)
+    a = {"sym": sym, "dir": direction, "kind": kind, "strat": strat or ("ТС№2 Local Long" if long else "ТС№3 Short"),
+         "tf": tf, "level": lvl, "tvx": tvx, "stop": stop,
          "take": take, "price": last[4], "t": last[0], "zone": _zone(bars, last[4]),
          "natr": round(natr, 2), "grade": grade or "УРОВЕНЬ", "relv": round(relv or 1.0, 2), "ts": time.time()}
     if extra:
@@ -284,9 +392,10 @@ def _detect(sym: str, bars: list, tf: str = "5m") -> list:
         return []
     min_rank = _GRADE_RANK.get(CFG.get("min_grade", "УРОВЕНЬ"), 1)
     tol, brk = float(CFG["tol"]), float(CFG["brk"])
-    sw_hi, sw_lo = _swings(bars[:-1])                    # свинги ДО пробойной свечи
-    res = _levels(sw_hi, tol)                            # сопротивления
-    sup = _levels(sw_lo, tol)                            # поддержки
+    sw_hi, sw_lo = _swings(bars[:-1])                    # свинги ДО пробойной свечи (полная история)
+    res_all = _levels(sw_hi, tol); sup_all = _levels(sw_lo, tol)   # ПОЛНЫЕ уровни — только для целей тейка
+    res, sup = _recent_levels(bars, tol)                 # СВЕЖИЕ уровни коила — для пробоя (метод Вики: граница поджатия)
+    lvls_take = res_all + sup_all                        # тейк ищем по всем уровням (следующий сверху/снизу)
     lines = _trendlines(sw_hi, sw_lo, bars, tol)
     c, pc = bars[-1][4], bars[-2][4]
     i_last = len(bars) - 1
@@ -302,7 +411,7 @@ def _detect(sym: str, bars: list, tf: str = "5m") -> list:
             continue
         for L in lvl_list:
             lvl = L["p"]
-            if not fresh_cross(lvl, long) or i_last - L["i_last"] > 150:
+            if not fresh_cross(lvl, long) or i_last - L["i_last"] > 12:   # уровень ТРОГАЛИ недавно = поджатие сейчас (не старьё)
                 continue
             # подтип по контексту подхода (схемы «как пробивать уровни»)
             kind = "базовый пробой уровня"
@@ -329,10 +438,19 @@ def _detect(sym: str, bars: list, tf: str = "5m") -> list:
             grade, _ = _grade(bars, lvl, natr, L["touches"])   # ХАЙ/УРОВЕНЬ/СЕТАП — нужна консолидация+импульс
             if _GRADE_RANK[grade] < min_rank:                  # слабый (без консолидации) — пропускаем (правило ТС)
                 continue
+            # классификация по 6 ТС: шорт→ТС3; лонг→Hook(ТС4)/Global(ТС1)/Local(ТС2)
+            hook_take = _hook_target(bars, lvl) if long else 0.0
+            if long and hook_take:
+                strat, tk, kind = "ТС№4 Hook", hook_take, kind + " (крючок)"
+            elif long:
+                strat, tk = _classify_long(bars, relv), None
+            else:
+                strat, tk = "ТС№3 Short", None
             found.append(_mk_alert(sym, "LONG" if long else "SHORT", kind, lvl, bars,
-                                   res + sup, tf, natr, {"touches": L["touches"]}, grade, relv))
+                                   res + sup, tf, natr, {"touches": L["touches"]}, grade, relv, strat, tk))
 
-    # ── пробой наклонки (по закрытию свечи — правило ТС) ──
+    # ── пробой наклонки / ТРЕУГОЛЬНИК (ТС5/6 — по закрытию свечи) ──
+    tri = _triangle(lines, bars)                         # есть сходящиеся границы = треугольник
     for t in lines:
         v = t["p1"] + t["slope"] * (i_last - t["i1"])
         pv = t["p1"] + t["slope"] * (i_last - 1 - t["i1"])
@@ -341,12 +459,26 @@ def _detect(sym: str, bars: list, tf: str = "5m") -> list:
         gr, _ = _grade(bars, v, natr, t["touches"])
         if _GRADE_RANK[gr] < min_rank:
             continue
-        if t["down"] and c > v * (1 + brk) and pc <= pv * (1 + brk):
-            found.append(_mk_alert(sym, "LONG", "пробой наклонки", v, bars, res + sup, tf, natr,
-                                   {"touches": t["touches"], "line": [t["i1"], t["p1"], i_last, v]}, gr, relv))
-        elif not t["down"] and CFG["shorts"] and c < v * (1 - brk) and pc >= pv * (1 - brk):
-            found.append(_mk_alert(sym, "SHORT", "пробой наклонки (дамп)", v, bars, res + sup, tf, natr,
-                                   {"touches": t["touches"], "line": [t["i1"], t["p1"], i_last, v]}, gr, relv))
+        if t["down"] and c > v * (1 + brk) and pc <= pv * (1 + brk):           # пробой ВВЕРХ верхней линии
+            is_tri = bool(tri and t is tri["up"])
+            if is_tri and CFG.get("btc_context", True) and _btc_trend() < 0:    # треугольник-лонг против падающего BTC → не ТС5
+                is_tri = False
+            strat = "ТС№5 Triangle Long" if is_tri else _classify_long(bars, relv)
+            kind = "пробой треугольника вверх" if is_tri else "пробой наклонки"
+            fb = _false_breakout(bars, v, True) if is_tri else False
+            found.append(_mk_alert(sym, "LONG", kind, v, bars, res + sup, tf, natr,
+                                   {"touches": t["touches"], "line": [t["i1"], t["p1"], i_last, v],
+                                    "false_out": fb, "btc": _btc_trend()}, gr, relv, strat))
+        elif not t["down"] and CFG["shorts"] and c < v * (1 - brk) and pc >= pv * (1 - brk):  # пробой ВНИЗ нижней
+            is_tri = bool(tri and t is tri["lo"])
+            if is_tri and CFG.get("btc_context", True) and _btc_trend() > 0:    # треугольник-шорт против растущего BTC → не ТС6
+                is_tri = False
+            strat = "ТС№6 Triangle Short" if is_tri else "ТС№3 Short"
+            kind = "пробой треугольника вниз" if is_tri else "пробой наклонки (дамп)"
+            fb = _false_breakout(bars, v, False) if is_tri else False
+            found.append(_mk_alert(sym, "SHORT", kind, v, bars, res + sup, tf, natr,
+                                   {"touches": t["touches"], "line": [t["i1"], t["p1"], i_last, v],
+                                    "false_out": fb, "btc": _btc_trend()}, gr, relv, strat))
 
     # ── боковик: плоский ренж 40+ свечей, пробой границы ──
     box = bars[-45:-1]
@@ -357,10 +489,10 @@ def _detect(sym: str, bars: list, tf: str = "5m") -> list:
         if top_t >= 2 and bot_t >= 2 and _impulse_before(bars, n_cons=44, n_imp=12):  # боковик ТОЛЬКО с приором-импульсом (ошибка №1 ТС)
             if fresh_cross(bh, True):
                 found.append(_mk_alert(sym, "LONG", "боковик. пробой (приор)", bh, bars, res + sup, tf, natr,
-                                       {"touches": top_t}, "СЕТАП", relv))
+                                       {"touches": top_t}, "СЕТАП", relv, _classify_long(bars, relv)))
             elif CFG["shorts"] and fresh_cross(bl, False):
                 found.append(_mk_alert(sym, "SHORT", "боковик. пробой вниз (приор)", bl, bars, res + sup, tf, natr,
-                                       {"touches": bot_t}, "СЕТАП", relv))
+                                       {"touches": bot_t}, "СЕТАП", relv, "ТС№3 Short"))
 
     # ── закол уровня с возвратом (свип лоя/хая → предвестник, схема «закол лоя 0.3-0.5») ──
     last = bars[-1]
@@ -480,6 +612,10 @@ def set_cfg(body: dict) -> dict:
         CFG["shorts"] = bool(body["shorts"])
     if body.get("min_grade") in _GRADE_RANK:
         CFG["min_grade"] = body["min_grade"]
+    if "top_movers" in body:
+        CFG["top_movers"] = bool(body["top_movers"])
+    if "btc_context" in body:
+        CFG["btc_context"] = bool(body["btc_context"])
     if isinstance(body.get("tfs"), list):
         good = [t for t in body["tfs"] if t in _TF_SEC]
         if good:

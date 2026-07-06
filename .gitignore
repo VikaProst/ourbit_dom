@@ -22,3 +22,5 @@ ourbit.txt
 bug_reports.jsonl
 bug_reports_local.jsonl
 mexc_order_log.txt
+taip_research/
+mexc_order_log*.txt
