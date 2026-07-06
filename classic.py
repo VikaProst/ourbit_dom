@@ -277,8 +277,12 @@ def _detect(sym: str, bars: list, tf: str = "5m") -> list:
         return []
     natr = _natr(bars)
     spike = _vol_spike(bars, float(CFG["vol_spike"]))
+    relv = _rel_vol(bars)                               # «новые деньги» — монета в игре
     if natr < float(CFG["natr_min"]) or not spike:      # мёртвая монета / нет всплеска → пропускаем
         return []
+    if relv < float(CFG["rel_vol_min"]):                # объём не вырос → актив не «в игре» (правило ТАЙП)
+        return []
+    min_rank = _GRADE_RANK.get(CFG.get("min_grade", "УРОВЕНЬ"), 1)
     tol, brk = float(CFG["tol"]), float(CFG["brk"])
     sw_hi, sw_lo = _swings(bars[:-1])                    # свинги ДО пробойной свечи
     res = _levels(sw_hi, tol)                            # сопротивления
@@ -322,8 +326,11 @@ def _detect(sym: str, bars: list, tf: str = "5m") -> list:
                        and 0.003 < (x["p"] - lvl) / lvl < 0.015]
                 if loc:
                     kind = "пробой уровня с локалки"
+            grade, _ = _grade(bars, lvl, natr, L["touches"])   # ХАЙ/УРОВЕНЬ/СЕТАП — нужна консолидация+импульс
+            if _GRADE_RANK[grade] < min_rank:                  # слабый (без консолидации) — пропускаем (правило ТС)
+                continue
             found.append(_mk_alert(sym, "LONG" if long else "SHORT", kind, lvl, bars,
-                                   res + sup, tf, natr, {"touches": L["touches"]}))
+                                   res + sup, tf, natr, {"touches": L["touches"]}, grade, relv))
 
     # ── пробой наклонки (по закрытию свечи — правило ТС) ──
     for t in lines:
@@ -331,12 +338,15 @@ def _detect(sym: str, bars: list, tf: str = "5m") -> list:
         pv = t["p1"] + t["slope"] * (i_last - 1 - t["i1"])
         if v <= 0:
             continue
+        gr, _ = _grade(bars, v, natr, t["touches"])
+        if _GRADE_RANK[gr] < min_rank:
+            continue
         if t["down"] and c > v * (1 + brk) and pc <= pv * (1 + brk):
             found.append(_mk_alert(sym, "LONG", "пробой наклонки", v, bars, res + sup, tf, natr,
-                                   {"touches": t["touches"], "line": [t["i1"], t["p1"], i_last, v]}))
+                                   {"touches": t["touches"], "line": [t["i1"], t["p1"], i_last, v]}, gr, relv))
         elif not t["down"] and CFG["shorts"] and c < v * (1 - brk) and pc >= pv * (1 - brk):
             found.append(_mk_alert(sym, "SHORT", "пробой наклонки (дамп)", v, bars, res + sup, tf, natr,
-                                   {"touches": t["touches"], "line": [t["i1"], t["p1"], i_last, v]}))
+                                   {"touches": t["touches"], "line": [t["i1"], t["p1"], i_last, v]}, gr, relv))
 
     # ── боковик: плоский ренж 40+ свечей, пробой границы ──
     box = bars[-45:-1]
@@ -344,13 +354,13 @@ def _detect(sym: str, bars: list, tf: str = "5m") -> list:
     if bl > 0 and (bh - bl) / bl < 0.05:
         top_t = sum(1 for b in box if abs(b[2] - bh) / bh < tol)
         bot_t = sum(1 for b in box if abs(b[3] - bl) / bl < tol)
-        if top_t >= 2 and bot_t >= 2:
+        if top_t >= 2 and bot_t >= 2 and _impulse_before(bars, n_cons=44, n_imp=12):  # боковик ТОЛЬКО с приором-импульсом (ошибка №1 ТС)
             if fresh_cross(bh, True):
-                found.append(_mk_alert(sym, "LONG", "боковик. пробой", bh, bars, res + sup, tf, natr,
-                                       {"touches": top_t}))
+                found.append(_mk_alert(sym, "LONG", "боковик. пробой (приор)", bh, bars, res + sup, tf, natr,
+                                       {"touches": top_t}, "СЕТАП", relv))
             elif CFG["shorts"] and fresh_cross(bl, False):
-                found.append(_mk_alert(sym, "SHORT", "боковик. пробой вниз", bl, bars, res + sup, tf, natr,
-                                       {"touches": bot_t}))
+                found.append(_mk_alert(sym, "SHORT", "боковик. пробой вниз (приор)", bl, bars, res + sup, tf, natr,
+                                       {"touches": bot_t}, "СЕТАП", relv))
 
     # ── закол уровня с возвратом (свип лоя/хая → предвестник, схема «закол лоя 0.3-0.5») ──
     last = bars[-1]
@@ -460,7 +470,7 @@ def chart(sym: str, tf: str = "5m") -> dict:
 
 
 def set_cfg(body: dict) -> dict:
-    for k in ("min24hvol", "topn", "scan_sec", "tol", "brk", "vol_spike", "natr_min"):
+    for k in ("min24hvol", "topn", "scan_sec", "tol", "brk", "vol_spike", "natr_min", "rel_vol_min"):
         if k in body:
             try:
                 CFG[k] = float(body[k]) if k != "topn" else int(body[k])
@@ -468,6 +478,8 @@ def set_cfg(body: dict) -> dict:
                 pass
     if "shorts" in body:
         CFG["shorts"] = bool(body["shorts"])
+    if body.get("min_grade") in _GRADE_RANK:
+        CFG["min_grade"] = body["min_grade"]
     if isinstance(body.get("tfs"), list):
         good = [t for t in body["tfs"] if t in _TF_SEC]
         if good:

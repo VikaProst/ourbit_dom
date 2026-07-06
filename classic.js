@@ -23,7 +23,11 @@
   .clascard .dir.L{background:rgba(46,160,67,.25);color:#4be38a}
   .clascard .dir.S{background:rgba(224,82,77,.25);color:#ff8a86}
   .clascard .tf{font-size:9px;font-weight:700;border-radius:3px;padding:0 4px;background:rgba(159,192,255,.16);color:#9fc0ff}
+  .clascard .grade{font-size:9px;font-weight:700;border-radius:3px;padding:0 4px;background:rgba(120,140,160,.18);color:#aeb7c4}
+  .clascard .grade.setup{background:rgba(230,169,67,.2);color:#ffcf6a}
   #clashead .chip.tf{background:rgba(159,192,255,.16);color:#9fc0ff}
+  #clashead .chip.grade{background:rgba(120,140,160,.18);color:#aeb7c4}
+  #clashead .chip.grade.setup{background:rgba(230,169,67,.2);color:#ffcf6a}
   .clascard .kind{color:#e6a943}
   .clascard .meta{color:#5b6573;font-size:10px}
   #clashead{display:flex;gap:10px;align-items:center;padding:3px 8px;font:11px ui-monospace,Consolas,monospace;color:#8a929c;border-bottom:1px solid rgba(255,255,255,.07);flex-wrap:wrap}
@@ -77,9 +81,10 @@
         <div class="cc1"><span class="sym">${a.sym.replace("USDT","")}</span>
           <span class="dir ${a.dir==="LONG"?"L":"S"}">${a.dir}</span>
           ${a.tf?('<span class="tf">'+a.tf+'</span>'):""}
+          ${a.grade?('<span class="grade '+(a.grade==="СЕТАП"?"setup":"")+'">'+a.grade+'</span>'):""}
           <span class="meta" style="margin-left:auto">${fmtT(a.t)}</span></div>
         <div class="kind">${a.kind}</div>
-        <div class="meta">ур ${fmtP(a.level)} · ${a.zone||""}${a.touches?(" · "+a.touches+"кас"):""}${a.natr?(" · NATR "+a.natr):""}</div>
+        <div class="meta">ур ${fmtP(a.level)} · ${a.zone||""}${a.touches?(" · "+a.touches+"кас"):""}${a.natr?(" · NATR "+a.natr):""}${a.relv?(" · V×"+a.relv):""}</div>
       </div>`).join("");
     box.querySelectorAll(".clascard").forEach(el=>{ el.onclick=()=>{
       const a=K.alerts.find(x=>x.id===+el.dataset.id); if(a){ K.sel=a; renderFeed(); loadChart(a.sym, a.tf); } }; });
@@ -88,7 +93,7 @@
     const h=g("clashead"), a=K.sel;
     if(!a){ h.innerHTML='<span class="clasempty">Выбери алерт слева — покажу график с уровнями и ТВХ</span>'; return; }
     const tp=a.take&&a.tvx?((Math.abs(a.take-a.tvx)/a.tvx*100)).toFixed(1)+"%":"";
-    h.innerHTML=`<b>${a.sym.replace("USDT","")}</b>${a.tf?('<span class="chip tf">'+a.tf+'</span>'):""}<span class="chip">${a.kind}</span>
+    h.innerHTML=`<b>${a.sym.replace("USDT","")}</b>${a.tf?('<span class="chip tf">'+a.tf+'</span>'):""}${a.grade?('<span class="chip grade '+(a.grade==="СЕТАП"?"setup":"")+'">'+a.grade+'</span>'):""}<span class="chip">${a.kind}</span>
       <span class="chip" style="color:${a.dir==="LONG"?"#4be38a":"#ff8a86"}">${a.dir}</span>
       <span class="chip">ТВХ ${fmtP(a.tvx)}</span><span class="chip" style="color:#ff8a86">СТОП ${fmtP(a.stop)}</span>
       <span class="chip" style="color:#4be38a">ТЕЙК ${fmtP(a.take)}${tp?(" (+"+tp+")"):""}</span><span class="chip">${a.zone||""}</span>`;
