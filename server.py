@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import asyncio
+import calendar
 import collections
 import json
 import os
@@ -52,6 +53,11 @@ try:
     import proxy as _proxy
 except Exception:
     _proxy = None
+# ── КЛАССИКА: сканер формаций ТС на Binance 5м (classic.py) ──
+try:
+    import classic as _classic
+except Exception:
+    _classic = None
 _raw_get = _SESSION.get
 def _get(url, **kw):
     """GET к бирже через активный прокси (если задан)."""
@@ -224,15 +230,25 @@ def _mexc_instruments() -> None:
         rows = _MEXC_SESS.get(f"{MEXC_BASE}/contract/detail", timeout=12).json().get("data") or []
     except Exception:
         return
-    tick, csz = {}, {}
+    tick, csz, maxlev = {}, {}, {}
     for r in rows:
         sym = r.get("symbol")
         if not sym:
             continue
         tick[sym] = r.get("priceUnit")
         csz[sym] = r.get("contractSize")
+        maxlev[sym] = r.get("maxLeverage")
     if tick:
-        _MEXC_INSTR.update({"ts": now, "tick": tick, "csize": csz})
+        _MEXC_INSTR.update({"ts": now, "tick": tick, "csize": csz, "maxlev": maxlev})
+
+
+def _mexc_maxlev(sym: str) -> int:
+    if not _MEXC_INSTR.get("maxlev"):
+        _mexc_instruments()
+    try:
+        return int(_MEXC_INSTR.get("maxlev", {}).get(sym) or 20)
+    except (TypeError, ValueError):
+        return 20
 
 
 def _mexc_tick(sym: str) -> float:
@@ -257,6 +273,74 @@ def _mexc_depth(sym: str) -> dict:
     data = _MEXC_SESS.get(f"{MEXC_BASE}/contract/depth/{sym}", timeout=8).json().get("data") or {}
     b, a = _clean_book(data.get("bids") or [], data.get("asks") or [])
     return {"symbol": sym, "bids": b, "asks": a, "ts": data.get("timestamp") or int(time.time() * 1000)}
+
+
+_MX_CSIZE: dict = {}          # sym -> contractSize (кэш из contract/detail)
+_MX_CSIZE_TS = [0.0]
+_MX_LIQ: dict = {}            # sym -> (usd, ts)  ликвидность до сдвига цены
+
+
+def _mx_csize() -> dict:
+    if _MX_CSIZE and time.time() - _MX_CSIZE_TS[0] < 3600:
+        return _MX_CSIZE
+    try:
+        arr = _MEXC_SESS.get(f"{MEXC_BASE}/contract/detail", timeout=12).json().get("data") or []
+        for c in arr:
+            s = (c.get("symbol") or "").upper()
+            if s:
+                _MX_CSIZE[s] = _ff(c.get("contractSize"))
+        _MX_CSIZE_TS[0] = time.time()
+    except Exception:
+        pass
+    return _MX_CSIZE
+
+
+def _mx_liq(sym: str, pct: float) -> int:
+    """Сколько $ можно КУПИТЬ на MEXC до сдвига цены на pct% (сумма аск-ноционала в окне)."""
+    now = time.time()
+    c = _MX_LIQ.get(sym)
+    if c and now - c[1] < 5:
+        return c[0]
+    usd = 0
+    try:
+        asks = _mexc_depth(sym).get("asks") or []
+        cs = _mx_csize().get(sym) or 0
+        if asks and cs:
+            best = asks[0][0]; lim = best * (1 + pct / 100.0)
+            tot = 0.0
+            for row in asks:
+                p, v = row[0], row[1]
+                if p > lim:
+                    break
+                tot += p * v * cs
+            usd = round(tot)
+    except Exception:
+        pass
+    _MX_LIQ[sym] = (usd, now)
+    return usd
+
+
+_MX_KL: dict = {}            # sym -> (points, ts)  кэш kline (история для окна 1ч/4ч)
+
+
+def _mx_kline(sym: str, minutes: int) -> list:
+    """История цены MEXC свечами → [[t_sec, close]] за последние `minutes` минут."""
+    now = time.time()
+    c = _MX_KL.get(sym)
+    if c and now - c[1] < 30 and c[2] == minutes:       # кэш учитывает окно (иначе 4ч-запрос отдаёт данные вместо 24ч)
+        return c[0]
+    pts = []
+    interval = "Min1" if minutes <= 1440 else "Min5"   # Min1 до 24ч (MEXC даёт 1440 свечей) — КАЖДОЕ движение чётко
+    try:
+        d = _MEXC_SESS.get(f"{MEXC_BASE}/contract/kline/{sym}",
+                           params={"interval": interval, "start": int(now) - minutes * 60, "end": int(now)},
+                           timeout=10).json().get("data") or {}
+        tt = d.get("time") or []; cc = d.get("close") or []
+        pts = [[int(tt[i]), _ff(cc[i])] for i in range(min(len(tt), len(cc))) if _ff(cc[i]) > 0]
+    except Exception:
+        pts = []
+    _MX_KL[sym] = (pts, now, minutes)
+    return pts
 
 
 def _mexc_deals(sym: str) -> list:
@@ -475,6 +559,37 @@ def _weex_trades_scanner():
             except Exception:
                 pass
             time.sleep(0.15)
+
+# ── СКАНЕР MEXC (колонка «Сделки» скринера) — зеркало WEEX-сканера: топ-12 монет, скорость ленты ──
+_MEXC_TR: dict = {}                         # sym -> (count, ts)  число сделок за окно
+_MEXC_TR_WANT = {"syms": [], "ts": 0.0}
+_MEXC_TR_LOCK = threading.Lock()
+def _mexc_trade_count(symbol: str, win_sec: int = 60) -> int:
+    """Сделок за окно по ленте MEXC (отдаёт ~100 последних → считаем СКОРОСТЬ и экстраполируем)."""
+    deals = _mexc_deals(symbol)
+    times = sorted(t for t in (float(d.get("t") or 0) for d in deals) if t > 0)
+    if len(times) < 2:
+        return len(deals)
+    span_ms = times[-1] - times[0]
+    if span_ms <= 0:
+        return len(times)
+    rate = len(times) / (span_ms / 1000.0)      # сделок/сек
+    return int(round(rate * win_sec))
+def _mexc_trades_scanner():
+    """Фон: число сделок MEXC по топ-монетам скринера в кэш. Активен только пока скринер с MEXC открыт."""
+    while True:
+        time.sleep(4)
+        with _MEXC_TR_LOCK:
+            want = list(_MEXC_TR_WANT["syms"])
+            wts = _MEXC_TR_WANT["ts"]
+        if not want or time.time() - wts > 25:
+            continue
+        for sym in want[:30]:
+            try:
+                _MEXC_TR[sym] = (_mexc_trade_count(sym), time.time())
+            except Exception:
+                pass
+            time.sleep(0.12)
 
 # ── WEEX WebSocket: real-time стакан (снимок+дельты) и лента для АКТИВНОГО символа ──
 _WEEX_WS = {"want": None, "sym": None, "bids": {}, "asks": {}, "trades": collections.deque(maxlen=400), "ts": 0.0}
@@ -982,10 +1097,10 @@ def _sym_strip_usdt(s: str) -> str:
     return s[:-4] + "_USDT" if s.endswith("USDT") else ""
 
 
-def _reg_ex(ex, url, parse=None, list_path="data", method="GET", body=None, build=None, headers=None):
+def _reg_ex(ex, url, parse=None, list_path="data", method="GET", body=None, build=None, headers=None, timeout=12):
     _EX_ADAPTERS[ex] = {"url": url, "parse": parse, "list": list_path,
-                        "method": method, "body": body, "build": build, "headers": headers}
-    _EX_HIST[ex] = {"hist": collections.deque(maxlen=60), "lock": threading.Lock()}
+                        "method": method, "body": body, "build": build, "headers": headers, "timeout": timeout}
+    _EX_HIST[ex] = {"hist": collections.deque(maxlen=180), "lock": threading.Lock()}   # ~3 мин при опросе 1с (посекундная детальность линий)
 
 
 def _dig(js, path):
@@ -1024,7 +1139,8 @@ def _p_mexc(t):
 def _p_bybit(t):
     s = _sym_strip_usdt(t.get("symbol"))
     return (s, _ff(t.get("lastPrice")), _ff(t.get("bid1Price")), _ff(t.get("ask1Price")),
-            _ff(t.get("turnover24h")), _ff(t.get("volume24h")), _ff(t.get("price24hPcnt"))) if s else None
+            _ff(t.get("turnover24h")), _ff(t.get("volume24h")), _ff(t.get("price24hPcnt")),
+            _ff(t.get("markPrice"))) if s else None                        # 8-й = справедливая (mark)
 
 
 def _p_okx(t):
@@ -1042,13 +1158,15 @@ def _p_gate(t):
     if not s.endswith("_USDT"):
         return None
     return (s, _ff(t.get("last")), _ff(t.get("highest_bid")), _ff(t.get("lowest_ask")),
-            _ff(t.get("volume_24h_quote")), _ff(t.get("volume_24h_base")), _ff(t.get("change_percentage")) / 100.0)
+            _ff(t.get("volume_24h_quote")), _ff(t.get("volume_24h_base")), _ff(t.get("change_percentage")) / 100.0,
+            _ff(t.get("mark_price")))                                       # 8-й = справедливая (mark)
 
 
 def _p_bitget(t):
     s = _sym_strip_usdt(t.get("symbol"))
     return (s, _ff(t.get("lastPr")), _ff(t.get("bidPr")), _ff(t.get("askPr")),
-            _ff(t.get("usdtVolume")), _ff(t.get("baseVolume")), _ff(t.get("change24h"))) if s else None
+            _ff(t.get("usdtVolume")), _ff(t.get("baseVolume")), _ff(t.get("change24h")),
+            _ff(t.get("markPrice"))) if s else None                         # 8-й = справедливая (mark)
 
 
 def _p_kucoin(t):
@@ -1144,9 +1262,26 @@ def _p_binance(t):
 
 
 def _p_binance_spot(t):
-    base = _sym_strip_usdt(t.get("symbol"))          # спот /api/v3/ticker/24hr — есть bid/ask
+    base = _sym_strip_usdt(t.get("symbol"))          # спот /api/v3/ticker/24hr — есть bid/ask (MEXC-спот тот же формат)
     return (base, _ff(t.get("lastPrice")), _ff(t.get("bidPrice")), _ff(t.get("askPrice")),
             _ff(t.get("quoteVolume")), _ff(t.get("volume")), _ff(t.get("priceChangePercent")) / 100.0) if base else None
+
+
+def _p_gatespot(t):
+    s = (t.get("currency_pair") or "").upper()
+    if not s.endswith("_USDT"):
+        return None
+    return (s, _ff(t.get("last")), _ff(t.get("highest_bid")), _ff(t.get("lowest_ask")),
+            _ff(t.get("quote_volume")), _ff(t.get("base_volume")), _ff(t.get("change_percentage")) / 100.0)
+
+
+def _p_okxspot(t):
+    iid = t.get("instId") or ""
+    if not iid.endswith("-USDT"):
+        return None
+    last = _ff(t.get("last")); op = _ff(t.get("open24h")); volc = _ff(t.get("volCcy24h"))
+    return (iid[:-5] + "_USDT", last, _ff(t.get("bidPx")), _ff(t.get("askPx")),
+            volc * last, volc, (last - op) / op if op else 0.0)
 
 
 def _p_lighter(t):
@@ -1182,7 +1317,7 @@ _reg_ex("weex", "https://api-contract.weex.com/capi/v2/market/tickers", _p_weex,
 _reg_ex("mexc", "https://contract.mexc.com/api/v1/contract/ticker", _p_mexc, list_path="data")
 _reg_ex("bybit", "https://api.bybit.com/v5/market/tickers?category=linear", _p_bybit, list_path="result.list")
 _reg_ex("okx", "https://www.okx.com/api/v5/market/tickers?instType=SWAP", _p_okx, list_path="data")
-_reg_ex("gate", "https://api.gateio.ws/api/v4/futures/usdt/tickers", _p_gate, list_path="root")
+_reg_ex("gate", "https://api.gateio.ws/api/v4/futures/usdt/tickers", _p_gate, list_path="root", timeout=20)
 _reg_ex("bitget", "https://api.bitget.com/api/v2/mix/market/tickers?productType=usdt-futures", _p_bitget, list_path="data")
 _reg_ex("kucoin", "https://api-futures.kucoin.com/api/v1/contracts/active", _p_kucoin, list_path="data")
 _reg_ex("bingx", "https://open-api.bingx.com/openApi/swap/v2/quote/ticker", _p_bingx, list_path="data")
@@ -1196,6 +1331,12 @@ _reg_ex("whitebit", "https://whitebit.com/api/v4/public/futures", _p_whitebit, l
 _reg_ex("asterdex", "https://fapi.asterdex.com/fapi/v1/ticker/24hr", _p_aster, list_path="root")
 _reg_ex("binance", "https://fapi.binance.com/fapi/v1/ticker/24hr", _p_binance, list_path="root")
 _reg_ex("binancespot", "https://api.binance.com/api/v3/ticker/24hr", _p_binance_spot, list_path="root")
+# ── СПОТ-фиды бирж (буква S в панели THIEF) ──
+_reg_ex("mexcspot", "https://api.mexc.com/api/v3/ticker/24hr", _p_binance_spot, list_path="root")
+_reg_ex("bybitspot", "https://api.bybit.com/v5/market/tickers?category=spot", _p_bybit, list_path="result.list")
+_reg_ex("gatespot", "https://api.gateio.ws/api/v4/spot/tickers", _p_gatespot, list_path="root")
+_reg_ex("okxspot", "https://www.okx.com/api/v5/market/tickers?instType=SPOT", _p_okxspot, list_path="data")
+_reg_ex("bitgetspot", "https://api.bitget.com/api/v2/spot/market/tickers", _p_bitget, list_path="data")
 _reg_ex("lighter", "https://mainnet.zklighter.elliot.ai/api/v1/orderBookDetails", _p_lighter, list_path="order_book_details")
 _reg_ex("hyperliquid", "https://api.hyperliquid.xyz/info", build=_build_hyperliquid, method="POST", body={"type": "metaAndAssetCtxs"})
 
@@ -1213,16 +1354,29 @@ _EX_SYMS: dict = {}          # ex -> set(symbols)  (какие монеты то
 _EX_SYMS_LOCK = threading.Lock()
 
 
+_BINANCE_BAN = [0.0]     # общий бэкофф Binance (418/429): и THIEF-поллер, и Классика уважают → бан рассасывается
+
+
 def _ex_fetch(ex: str) -> dict:
     """Один запрос all-tickers биржи → snap {sym: (turn,base,rise,last,bid,ask)}."""
     ad = _EX_ADAPTERS[ex]
-    kw = {"timeout": 12}
+    kw = {"timeout": ad.get("timeout", 12)}
     if ad.get("headers"):
         kw["headers"] = ad["headers"]
     if ad["method"] == "POST":
         resp = _post(ad["url"], json=ad["body"], **kw)
     else:
         resp = _get(ad["url"], **kw)
+    sc = getattr(resp, "status_code", 200)
+    if sc in (418, 429) and "binance" in ad["url"]:      # лимит Binance — встаём на паузу (Retry-After), не долбим
+        try:
+            wait = int(resp.headers.get("Retry-After") or 120)
+        except (TypeError, ValueError):
+            wait = 120
+        _BINANCE_BAN[0] = time.time() + min(max(wait, 60), 1800)
+        if _classic:
+            _classic.set_ban(_BINANCE_BAN[0])            # синхронизируем бан с модулем Классики (общий IP)
+        raise RuntimeError("binance %s ban" % sc)
     js = resp.json()
     if ad.get("build"):
         return ad["build"](js) or {}
@@ -1234,7 +1388,7 @@ def _ex_fetch(ex: str) -> dict:
         except Exception:
             r = None
         if r and r[0]:
-            snap[r[0]] = (r[4], r[5], r[6], r[1], r[2], r[3])
+            snap[r[0]] = (r[4], r[5], r[6], r[1], r[2], r[3], r[7] if len(r) > 7 else 0.0)   # [6]=fair (mark), 0 если биржа не отдаёт
     return snap
 
 
@@ -1249,19 +1403,24 @@ def _ex_poll(ex: str):
             if time.time() - _EX_WANT.get(ex, 0) > _EX_TTL:
                 time.sleep(2)                    # никто не смотрит эту биржу — не жжём сеть/CPU
                 continue
+            if ex in ("binance", "binancespot") and time.time() < _BINANCE_BAN[0]:
+                time.sleep(3)                    # бан Binance — не долбим (иначе бан не кончится); линии панели замрут
+                continue
             snap = _ex_fetch(ex)
             _set_syms(ex, snap)
             with _EX_HIST[ex]["lock"]:
                 _EX_HIST[ex]["hist"].append((time.time(), snap))
         except Exception:
             pass
-        time.sleep(2)
+        # Binance-тикер = вес 40; каждую секунду = ВЕСЬ лимит IP → klines Классики его переполняют.
+        # Опрашиваем Binance раз в 3с (оставляем лимит сканеру), остальные биржи — раз в 1с как было.
+        time.sleep(3.0 if ex in ("binance", "binancespot") else 1.0)
 
 
 # ─────────── MEXC «справедливая цена» (fairPrice) — отдельный кэш+поллер для панели MEXC↔DEX ───────────
 # _EX_HIST["mexc"] хранит только last (парсер отбрасывает fairPrice). Панель показывает справедливую
 # цену отдельной линией — поэтому качаем all-ticker MEXC ещё раз, сохраняя (last, fair) с историей.
-_MXFAIR = {"hist": collections.deque(maxlen=60), "lock": threading.Lock()}
+_MXFAIR = {"hist": collections.deque(maxlen=180), "lock": threading.Lock()}
 _MXFAIR_WANT = [0.0]      # время последнего запроса из панели (ленивый опрос — не жжём сеть, если панель закрыта)
 
 
@@ -1290,15 +1449,17 @@ def _mxfair_poll():
                 _MXFAIR["hist"].append((time.time(), snap))
         except Exception:
             pass
-        time.sleep(2)
+        time.sleep(1.0)                              # ~1с — справедливая MEXC тикает так же часто, как линии бирж
 
 
 # ─────────── On-chain цена по контракту (Dexscreener, БЕСПЛАТНО без ключа) — фиолетовая DEX-линия [CA] ───────────
 # DexTools API платный; Dexscreener даёт ту же USD-цену с самого ликвидного пула. symbol→контракт кэшируем
 # в dex_map.json (+ ручной оверрайд). Опрашиваем только монеты, которые СЕЙЧАС смотрит панель (бережём лимит).
-_DEX = {"hist": collections.deque(maxlen=60), "lock": threading.Lock()}
+_DEX = {"hist": collections.deque(maxlen=300), "lock": threading.Lock()}   # ~55мин истории при быстром цикле
 _DEX_MAP: dict = {}                              # base -> {chain,pair,addr,liq} | {"skip":True}
 _DEX_WANT: dict = {}                             # base -> ts последнего запроса из панели
+_DEX_REF: dict = {}                              # base -> референс-цена CEX (отсечка коллизий тикера)
+_DEX_TS: dict = {}                               # base -> ts последнего СВЕЖЕГО опроса цены (гард актуальности алертов)
 _DEX_MAP_FILE = os.path.join(HERE, "dex_map.json")
 
 
@@ -1323,30 +1484,190 @@ def _dex_want(base):
     _DEX_WANT[base] = time.time()
 
 
-def _dex_resolve(base):
-    """Самый ликвидный пул тикера через Dexscreener search → кэш в _DEX_MAP."""
+import math as _math
+_DEX_GOODQ = {"USDC", "USDT", "WETH", "WBNB", "SOL", "WSOL", "DAI", "USDE", "ETH", "BNB",
+              "USDC.E", "USD1", "FDUSD", "TUSD", "USDD", "USDP", "WBTC"}
+# ТЯЖИ — только настоящие блю-чипы, где цена DEX = цена биржи (арбитража нет). Спред-колл по ним = битый пул-тёзка → игнор.
+_DEX_HEAVY = {"BTC", "ETH", "XRP", "BNB", "SOL", "DOGE", "ADA", "TRX", "LTC", "BCH",
+              "DOT", "LINK", "AVAX", "XLM", "XMR", "ATOM", "TON",
+              "WBTC", "WETH", "STETH", "PAXG", "XAUT", "USDC", "USDT", "DAI"}
+
+
+_DEX_MIN_VOL = 20000                             # мин. объём пула 24ч ($): ниже = мёртвый пул, цена застывает → ложный спред
+_DEX_MIN_TURN = 0.005                            # мин. оборот/ликвидность (0.5%/сут): отсекает ФЕЙКОВЫЕ «глубокие-мёртвые» пулы-тёзки ($1B ликв. + ~0 оборот)
+
+
+def _dex_vol(p):
+    """Объём 24ч пула ($). Главный критерий выбора пула — где реально идёт торговля, там живая цена (как смотрит друг)."""
+    return _ff((p.get("volume") or {}).get("h24"))
+
+
+def _dex_fake(liq, vol):
+    """Пул-фейк? Абсурдная ликвидность при мизерном обороте = тёзка/спуф (даёт ложный спред-колл)."""
+    return liq > 0 and vol < liq * _DEX_MIN_TURN
+
+
+def _dex_resolve(base, ca=None):
+    """Резолв пула DEX. ПРИОРИТЕТ — по КОНТРАКТУ токена (как THIEF, иммунитет к коллизии тикера);
+    иначе поиск по тикеру со смягчённым гардом (ближе к цене CEX + по ликвидности)."""
     m = _DEX_MAP.get(base)
-    if m:                                        # уже знаем (адрес или skip) — не долбить
+    if m:                                        # уже знаем (адрес/пара или skip) — не долбить
         return m
+    if base in _DEX_HEAVY and not ca:            # тяж без явного контракта — не резолвим (арбитража нет, будет тёзка)
+        _DEX_MAP[base] = {"skip": True}; return _DEX_MAP[base]
+    ca = ca or (m or {}).get("addr")
+    if ca:                                       # ── по контракту: пул с макс. объёмом (живой) ──
+        try:
+            ps = _get("https://api.dexscreener.com/latest/dex/tokens/" + ca, timeout=10).json().get("pairs") or []
+            live = [p for p in ps if _ff(p.get("priceUsd")) > 0 and _dex_vol(p) >= _DEX_MIN_VOL
+                    and not _dex_fake(_ff((p.get("liquidity") or {}).get("usd")), _dex_vol(p))]  # мёртвые/фейковые пулы мимо
+            best = max(live, key=_dex_vol, default=None)     # выбираем пул с МАКС. объёмом 24ч (живая цена, как смотрит друг)
+            if best:
+                mm = {"chain": best.get("chainId"), "pair": best.get("pairAddress"), "addr": ca,
+                      "liq": round(_ff((best.get("liquidity") or {}).get("usd"))), "vol": round(_dex_vol(best))}
+                _DEX_MAP[base] = mm; _dex_save_map(); return mm
+        except Exception:
+            pass
+    if len(base) <= 2:                           # однобуквенные тикеры по поиску бесполезны — только по CA
+        return {"skip": True}
+    ref = _DEX_REF.get(base, 0.0)
     try:
         pairs = _get("https://api.dexscreener.com/latest/dex/search",
                      params={"q": base}, timeout=10).json().get("pairs") or []
-        best = None; bestliq = 0.0
+        cand = []
         for p in pairs:
             if ((p.get("baseToken") or {}).get("symbol") or "").upper() != base:
                 continue
-            liq = _ff((p.get("liquidity") or {}).get("usd"))
-            if liq > bestliq:
-                bestliq = liq; best = p
-        if best and bestliq > 0:
-            m = {"chain": best.get("chainId"), "pair": best.get("pairAddress"),
-                 "addr": (best.get("baseToken") or {}).get("address"), "liq": round(bestliq)}
+            if ((p.get("quoteToken") or {}).get("symbol") or "").upper() not in _DEX_GOODQ:
+                continue
+            px = _ff(p.get("priceUsd")); liq = _ff((p.get("liquidity") or {}).get("usd"))
+            if px > 0 and liq >= 25000 and _dex_vol(p) >= _DEX_MIN_VOL and not _dex_fake(liq, _dex_vol(p)):
+                cand.append((p, px, liq))         # мимо: тонкие (<$25k), мёртвые (<$20k), и ФЕЙКОВЫЕ (огромная ликв.+нулевой оборот = тёзка)
+        if ref and cand:                          # у настоящей монеты цена DEX≈цене биржи → двойники отсекаются ценой
+            cand = [c for c in cand if 0.88 <= c[1] / ref <= 1.12]     # ТОЛЬКО ±~12%: реальный арбитраж MEXC↔DEX тут, шире = обёрнутый пул-тёзка
+        elif not ref:                             # нет цены с биржи (не знаем ref) — не рискуем, только по CA
+            cand = []
+        best = max(cand, key=lambda c: _dex_vol(c[0]), default=None)   # пул с МАКС. объёмом 24ч — живая цена (как друг)
+        if best:
+            bp = best[0]
+            m = {"chain": bp.get("chainId"), "pair": bp.get("pairAddress"),
+                 "addr": (bp.get("baseToken") or {}).get("address"),
+                 "liq": round(best[2]), "vol": round(_dex_vol(bp))}
+            _DEX_MAP[base] = m; _dex_save_map()
         else:
             m = {"skip": True}
-        _DEX_MAP[base] = m; _dex_save_map()
         return m
     except Exception:
         return {}
+
+
+# Dexscreener chainId → GeckoTerminal network slug (для истории свечей DEX-пула)
+_GT_NET = {"ethereum": "eth", "bsc": "bsc", "solana": "solana", "base": "base", "arbitrum": "arbitrum",
+           "polygon": "polygon_pos", "optimism": "optimism", "avalanche": "avax", "fantom": "ftm",
+           "sui": "sui-network", "ton": "ton", "tron": "tron", "blast": "blast", "linea": "linea", "scroll": "scroll",
+           "mantle": "mantle", "zksync": "zksync-era", "celo": "celo", "cronos": "cro", "sonic": "sonic",
+           "berachain": "berachain", "unichain": "unichain", "hyperliquid": "hyperevm", "abstract": "abstract",
+           "ink": "ink", "apechain": "apechain", "world-chain": "world-chain", "pulsechain": "pulsechain",
+           "seiv2": "sei-evm", "gnosischain": "xdai", "moonbeam": "moonbeam",
+           "worldchain": "world-chain", "taiko": "taiko"}
+_DEX_KL: dict = {}                                # (base) -> (pts, ts) кэш истории DEX-свечей (совместимость)
+_DEX_OHLC: dict = {}                              # (base) -> (bars, ts, minutes) кэш OHLC-свечей DEX
+
+
+def _dex_ohlc(base: str, minutes: int) -> list:
+    """OHLC-свечи DEX-пула (GeckoTerminal, бесплатно) → [[t_sec, open, high, low, close]] за последние `minutes` минут.
+    Полная история свечей DEX (для свечного графика), масштаб выправлен к живой цене Dexscreener."""
+    m = _DEX_MAP.get(base)
+    if not m or m.get("skip") or not m.get("chain") or not m.get("pair"):
+        return []
+    now = time.time()
+    c = _DEX_OHLC.get(base)
+    if c and now - c[1] < 45 and c[2] == minutes:  # кэш 45с, учитывает окно (иначе 4ч-запрос отдаёт данные вместо 24ч)
+        return c[0]
+    net = _GT_NET.get(m["chain"], m["chain"])
+    bars = []
+    try:
+        agg = 1 if minutes <= 600 else 5 if minutes <= 3000 else 15   # 24ч (1440м) = 5-мин свечи (минутный лимит 1000 не покроет)
+        lim = min(1000, minutes // agg + 10)
+        url = f"https://api.geckoterminal.com/api/v2/networks/{net}/pools/{m['pair']}/ohlcv/minute"
+        gp = {"aggregate": agg, "limit": lim, "currency": "usd"}
+        if m.get("addr"):
+            gp["token"] = m["addr"]                # цена ИМЕННО нашей монеты (иначе GT берёт базовый токен пула → чужая цена)
+        d = _get(url, params=gp, timeout=10).json()
+        lst = (((d.get("data") or {}).get("attributes") or {}).get("ohlcv_list")) or []
+        if not lst and gp.get("token"):           # GT отверг token-адрес (не-EVM формат, напр. sui «0x…::sui::SUI» → 400) → повтор без token, масштаб выправит якорь ниже
+            gp.pop("token", None)
+            d = _get(url, params=gp, timeout=10).json()
+            lst = (((d.get("data") or {}).get("attributes") or {}).get("ohlcv_list")) or []
+        for x in lst:                             # ohlcv_list: [ts, open, high, low, close, volume]
+            if len(x) >= 5:
+                o, h, l, cl = _ff(x[1]), _ff(x[2]), _ff(x[3]), _ff(x[4])
+                if cl > 0 and o > 0:
+                    bars.append([int(x[0]), o, h, l, cl])
+        bars.sort()
+        live = _dex_price(base)                   # привязка к правде Dexscreener: если GT даёт иной масштаб — подгоняем ВСЕ o/h/l/c
+        if live > 0 and bars and bars[-1][4] > 0:
+            f = live / bars[-1][4]
+            if f < 0.98 or f > 1.02:              # масштаб/сторона GT разошлись с живой ценой >2% → выравниваем всю историю к правде Dexscreener
+                bars = [[t, o * f, h * f, l * f, cl * f] for t, o, h, l, cl in bars]
+    except Exception:
+        bars = []
+    _DEX_OHLC[base] = (bars, now, minutes)
+    return bars
+
+
+def _dex_kline(base: str, minutes: int) -> list:
+    """История цены DEX линией → [[t_sec, close]] (оверлей/совместимость). Строится из OHLC-кэша, без лишних запросов."""
+    return [[t, cl] for t, o, h, l, cl in _dex_ohlc(base, minutes)]
+
+
+_DEX_TRADES: dict = {}                            # base -> (pts, ts) кэш per-swap сделок DEX
+
+
+def _dex_trades(base: str) -> list:
+    """ПОСВОПОВАЯ цена DEX (каждая сделка) → [[t_sec, price_usd]] последних ~200 свопов (GeckoTerminal /trades).
+    Даёт детальную линию DEX как у друга: каждое движение = реальный своп в пуле (мельче, чем snapshot Dexscreener)."""
+    m = _DEX_MAP.get(base)
+    if not m or m.get("skip") or not m.get("chain") or not m.get("pair"):
+        return []
+    now = time.time()
+    c = _DEX_TRADES.get(base)
+    if c and now - c[1] < 6:                      # кэш 6с (свопы прилетают не чаще)
+        return c[0]
+    net = _GT_NET.get(m["chain"], m["chain"])
+    addr = (m.get("addr") or "").lower()
+    pts = []
+    try:
+        url = f"https://api.geckoterminal.com/api/v2/networks/{net}/pools/{m['pair']}/trades"
+        d = _get(url, timeout=10).json()
+        for t in (d.get("data") or []):
+            a = t.get("attributes") or {}
+            ts = a.get("block_timestamp") or ""
+            try:
+                sec = calendar.timegm(time.strptime(ts, "%Y-%m-%dT%H:%M:%SZ"))
+            except Exception:
+                continue
+            fa = (a.get("from_token_address") or "").lower()
+            ta = (a.get("to_token_address") or "").lower()
+            if addr and ta == addr:               # наша монета = to → её цена price_to
+                px = _ff(a.get("price_to_in_usd"))
+            elif addr and fa == addr:             # наша монета = from
+                px = _ff(a.get("price_from_in_usd"))
+            else:                                 # без addr — берём меньшую по величине (обычно наша дешёвая монета, а не quote-стейбл/WBNB)
+                pf, pt = _ff(a.get("price_from_in_usd")), _ff(a.get("price_to_in_usd"))
+                px = min([p for p in (pf, pt) if p > 0] or [0])
+            if px > 0:
+                pts.append([sec, px])
+        pts.sort()
+        live = _dex_price(base)                   # выравнивание масштаба к правде Dexscreener
+        if live > 0 and pts and pts[-1][1] > 0:
+            f = live / pts[-1][1]
+            if f < 0.9 or f > 1.1:
+                pts = [[s, p * f] for s, p in pts]
+    except Exception:
+        pts = []
+    _DEX_TRADES[base] = (pts, now)
+    return pts
 
 
 def _dex_price(base):
@@ -1363,33 +1684,111 @@ def _dex_price(base):
     return 0.0
 
 
+_DEX_POLL_CAP = 120                                  # потолок постоянного опроса вотчлиста (лимит Dexscreener)
+_DEX_SLOW_BATCH = 24                                 # монет вотчлиста за один проход (ротацией) — проход ~12с, вся сотня освежается за ~5 проходов (<90с гарда)
+_DEX_FRESH_SEC = 90                                  # старше — цена DEX считается протухшей (не берём в спред-коллы)
+_dex_slow_off = 0                                    # смещение ротации медленного ряда
+
+
 def _dex_poll():
-    """On-chain цены только для монет, что смотрит панель. Разнесено во времени — бережём лимит Dexscreener."""
+    """On-chain цены. ДВА РЯДА: быстрый — монеты, открытые в панели (их видит юзер), качаем КАЖДЫЙ проход
+    → живая тикающая линия; медленный — вотчлист по объёму, опрашиваем ротацией порциями (для ленты спред-коллов).
+    Так монеты в ячейках освежаются за ~10-15с вместо ~60с, при этом лимит Dexscreener соблюдён."""
+    global _dex_slow_off
     while True:
         try:
             now = time.time()
-            bases = [b for b, t in list(_DEX_WANT.items()) if now - t <= 45]
+            fast = [b for b, t in list(_DEX_WANT.items()) if now - t <= 45]      # открыто в панели — всегда
+            fastset = set(fast)
+            watch = [b for b, mm in list(_DEX_MAP.items())
+                     if isinstance(mm, dict) and not mm.get("skip") and mm.get("pair") and b not in fastset]
+            watch.sort(key=lambda b: (_DEX_MAP.get(b) or {}).get("vol", 0)
+                       or (_DEX_MAP.get(b) or {}).get("liq", 0), reverse=True)   # активные пулы — в приоритет
+            watch = watch[:_DEX_POLL_CAP]
+            if watch:
+                _dex_slow_off %= len(watch)
+                slow = watch[_dex_slow_off:_dex_slow_off + _DEX_SLOW_BATCH]
+                _dex_slow_off += _DEX_SLOW_BATCH
+            else:
+                slow = []
+            bases = fast + [b for b in slow if b not in fastset]
             if not bases:
                 time.sleep(2); continue
-            snap = dict(_DEX["hist"][-1][1]) if _DEX["hist"] else {}   # держим прошлые значения между опросами
+            snap = dict(_DEX["hist"][-1][1]) if _DEX["hist"] else {}   # держим прошлые значения между опросами (линия непрерывна)
+            mx_last = {}                                              # живая цена MEXC (для проверки дрейфа пула)
+            mh = _EX_HIST.get("mexc")
+            if mh:
+                with mh["lock"]:
+                    ms = mh["hist"][-1][1] if mh["hist"] else {}
+                mx_last = {s.replace("_USDT", ""): v[3] for s, v in ms.items() if v and v[3]}
             for b in bases:
-                if b not in _DEX_MAP:
-                    _dex_resolve(b); time.sleep(0.4)
+                m = _DEX_MAP.get(b)
+                if m is None:
+                    _dex_resolve(b); time.sleep(0.3); m = _DEX_MAP.get(b)
+                if not isinstance(m, dict) or m.get("skip") or not m.get("pair"):
+                    continue                                          # нечего качать — без сетевого запроса и без паузы
                 px = _dex_price(b)
                 if px:
-                    snap[b] = px
-                time.sleep(0.4)
+                    ml = mx_last.get(b)                               # ЖИВОЙ гард тёзки: DEX уехал >15% от MEXC → пул неверный, выкинуть
+                    if ml and ml > 0 and (px / ml > 1.15 or px / ml < 0.87):
+                        _DEX_REF[b] = ml; _DEX_MAP[b] = {"skip": True}
+                        _DEX_TS.pop(b, None); snap.pop(b, None); _dex_save_map()
+                    else:
+                        snap[b] = px; _DEX_TS[b] = time.time()        # отметка свежести (для гарда актуальности)
+                time.sleep(0.3)
             with _DEX["lock"]:
-                _DEX["hist"].append((now, snap))
+                _DEX["hist"].append((time.time(), snap))
         except Exception:
             pass
-        time.sleep(2)
+        time.sleep(1)
+
+
+_DEX_SEED_TOPN = 260                                  # сколько топ-монет MEXC по обороту пытаться привязать к DEX
+
+
+def _dex_seed():
+    """Фоновый посев вотчлиста: топ монет MEXC по обороту → подобрать правильный DEX-пул (жёсткая проверка
+    цена≈биржа + ликвидность) и закэшировать в dex_map. Так лента MEXC↔DEX наполняется САМА, без ручной вставки CA."""
+    time.sleep(25)                                   # дать mexc прогреться
+    while True:
+        try:
+            for b, mm in list(_DEX_MAP.items()):     # выкинуть закэшированные МЁРТВЫЕ/ФЕЙКОВЫЕ пулы → перерезолв/skip
+                if isinstance(mm, dict) and mm.get("pair") and mm.get("vol") is not None \
+                   and (mm["vol"] < _DEX_MIN_VOL or _dex_fake(mm.get("liq", 0), mm["vol"])):
+                    _DEX_MAP.pop(b, None); _DEX_REF.pop(b, None)
+            _ex_want("mexc")
+            h = _EX_HIST.get("mexc")
+            snap = {}
+            if h:
+                with h["lock"]:
+                    snap = h["hist"][-1][1] if h["hist"] else {}
+            ranked = sorted(((sym, v) for sym, v in snap.items() if v and v[3] and v[0]),
+                            key=lambda kv: kv[1][0], reverse=True)[:_DEX_SEED_TOPN]
+            if len(ranked) < 20:                      # MEXC ещё не прогрелся (мало монет) → короткая пауза и повтор, НЕ спать 10 мин
+                time.sleep(15); continue
+            for sym, v in ranked:
+                base = sym.replace("_USDT", "")
+                if base in _DEX_MAP:                  # уже пробовали (пул или skip) — не долбим повторно
+                    continue
+                if base in _DEX_HEAVY or len(base) <= 2:   # тяжи (BTC/ETH/XRP…) — без арбитража, пропускаем
+                    _DEX_MAP[base] = {"skip": True}; continue
+                _DEX_REF[base] = v[3]                 # ref = последняя цена MEXC (для отсечки монет-двойников)
+                try:
+                    _dex_resolve(base)
+                except Exception:
+                    _DEX_MAP[base] = {"skip": True}
+                time.sleep(0.5)                       # ~120 запросов/мин — под лимитом Dexscreener
+        except Exception:
+            pass
+        time.sleep(600)                               # раз в 10 мин добираем новые монеты в топе
 
 
 def _grid_series(syms, exs, want_fair, want_dex=False):
     """Серии цены монеты сразу по нескольким биржам (+справедливая MEXC, +on-chain DEX) для панели MEXC↔DEX.
     Возвращает {sym: {"s": {ex: [[t,last]...]}, "m": {ex: {last,turn,rise}}}}."""
-    for e in exs:                                    # прогреть нужные фиды (ленивый опрос)
+    fair_exs = [e[:-4] for e in exs if e.endswith("fair") and e != "mexcfair" and e[:-4] in _EX_ADAPTERS]   # bybitfair→bybit: справедливая ИЗ ТОГО ЖЕ тикера биржи
+    exs = [e for e in exs if not e.endswith("fair") or e == "mexcfair"]
+    for e in exs + fair_exs:                         # прогреть нужные фиды (ленивый опрос)
         if e in _EX_ADAPTERS:
             _ex_want(e)
     if want_fair:
@@ -1415,6 +1814,17 @@ def _grid_series(syms, exs, want_fair, want_dex=False):
                 nv = hist[-1][1].get(sym)
                 if nv:
                     m[e] = {"last": nv[3], "turn": round(nv[0]), "rise": round(nv[2] * 100, 2)}
+        for e in fair_exs:                            # справедливая (mark) биржи: серия из 7-го поля снапшота
+            h = _EX_HIST.get(e)
+            if not h:
+                continue
+            with h["lock"]:
+                hist = list(h["hist"])
+            fa = [[round(t, 1), v[6]] for (t, snap) in hist
+                  for v in (snap.get(sym),) if v and len(v) > 6 and v[6]]
+            if fa:
+                s[e + "fair"] = fa
+                m[e + "fair"] = {"last": fa[-1][1], "turn": 0, "rise": 0.0}
         if want_fair:
             with _MXFAIR["lock"]:
                 fh = list(_MXFAIR["hist"])
@@ -1424,9 +1834,13 @@ def _grid_series(syms, exs, want_fair, want_dex=False):
                   for v in (snap.get(sym),) if v]
             if fa:
                 s["mexcfair"] = fa
+                m["mexcfair"] = {"last": fa[-1][1], "turn": 0, "rise": 0.0}   # живой фолбэк — пунктир справедливой не рвётся между поллами
             if fl and "mexc" not in s:               # если mexc-фид не выбран — берём last из fair-поллера
                 s["mexc"] = fl
         if want_dex:
+            _ref = (m.get("mexc") or m.get("binance") or m.get("bybit") or {}).get("last") or 0.0
+            if _ref:
+                _DEX_REF[base] = _ref                 # референс CEX для отсечки коллизий при резолве DEX
             _dex_want(base)                          # попросить поллер качать эту монету
             da = [[round(t, 1), snap[base]] for (t, snap) in dh if snap.get(base)]
             if da:
@@ -1436,9 +1850,183 @@ def _grid_series(syms, exs, want_fair, want_dex=False):
     return out
 
 
+# ─────────── Помесекундный рекордер цен (MEXC last + DEX + справедливая) — ПЛОТНАЯ история для панели MEXC↔DEX ───────────
+# Свечи kline дают 1 точку/мин (грубо). Рекордер сэмплит цену КАЖДУЮ ~1с в кольцевые буферы → на графике виден
+# каждый тик расхождения MEXC↔DEX сразу при открытии (не ждём, пока живой фид медленно наполнит). Пишем ТОЛЬКО
+# монеты, которые сейчас смотрят (потолок числа монет + maxlen буфера) — память ограничена, CPU не жжём.
+_PX: dict = {}                                       # base -> {feed:deque}, элемент = (t_sec, price). feed: mexc/dex/fair + осн. биржи
+_PX_LOCK = threading.Lock()
+_PX_MAXLEN = 7200                                    # ~2ч посекундно на линию (записываем МНОГО бирж → бюджет памяти)
+_PX_CEX = ("binance", "bybit", "gate", "bitget", "okx", "bingx", "ourbit", "asterdex")   # доп. биржи для посекундной истории (mexc пишется отдельно)
+_PX_MAX_COINS = 60                                   # потолок числа одновременно записываемых монет (память/CPU)
+_PREWARM_TOP = 24                                    # сколько САМЫХ активных монет ленты пред-писать посекундно (чтоб при открытии график был уже детальный)
+_PX_WATCH_SEC = 60                                   # монета «смотрится», если её просили из панели в этом окне
+_PX_KEEP_SEC = 900                                   # держим буфер ещё ~15мин после того как перестали смотреть (реопен покажет историю)
+_PX_WATCH: dict = {}                                 # base -> ts последнего явного «просмотра» (запрос /api/pxhist)
+_PX_DEX_HOT: dict = {}                                # base -> (ts, px) — «горячая» DEX-цена, опрашивается часто для ОТКРЫТЫХ монет
+_PX_HOT_MAX = 30                                      # сколько открытых монет опрашивать DEX часто (батч Dexscreener: до 30 пар/сеть 1 запросом → все открытые обновляются ~1-2с)
+
+
+def _px_watch(base):
+    _PX_WATCH[base] = time.time()
+
+
+def _px_dex_hot():
+    """Частый опрос DEX-цены для ОТКРЫТЫХ монет — БАТЧАМИ: Dexscreener принимает до 30 пар ОДНИМ запросом
+    (/pairs/{chain}/{p1},{p2},…). Одна сеть = один запрос → в разы меньше запросов (нет 429 rate-limit),
+    обновление ~1-2с на ВСЕ открытые монеты сразу (раньше 0.35с/монету по очереди — ловили 429, цена стояла)."""
+    while True:
+        try:
+            now = time.time()
+            hot = [b for b, t in list(_DEX_WANT.items()) if now - t <= 30]        # реально открыто сейчас
+            hot.sort(key=lambda b: -_DEX_WANT.get(b, 0))
+            hot = hot[:_PX_HOT_MAX]
+            groups = {}                                                           # chain -> [(base, pair_lower)]
+            for b in hot:
+                m = _DEX_MAP.get(b)
+                if not isinstance(m, dict) or m.get("skip") or not m.get("pair") or not m.get("chain"):
+                    continue
+                groups.setdefault(m["chain"], []).append((b, m["pair"].lower()))
+            did = False
+            for chain, lst in groups.items():
+                try:
+                    pairs = ",".join(p for _, p in lst[:30])
+                    js = _get(f"https://api.dexscreener.com/latest/dex/pairs/{chain}/{pairs}", timeout=10).json()
+                    arr = js.get("pairs") or ([js.get("pair")] if js.get("pair") else [])
+                    bypair = {(p.get("pairAddress") or "").lower(): _ff(p.get("priceUsd")) for p in arr if p}
+                    ts = time.time()
+                    for b, pr in lst:
+                        px = bypair.get(pr) or 0.0
+                        if px > 0:
+                            _PX_DEX_HOT[b] = (ts, px)
+                    did = True
+                except Exception:
+                    pass
+                time.sleep(0.4)
+            for b in list(_PX_DEX_HOT.keys()):                                   # чистим давно не открытые
+                if now - _DEX_WANT.get(b, 0) > 120:
+                    _PX_DEX_HOT.pop(b, None)
+            if not did:
+                time.sleep(1)
+        except Exception:
+            pass
+        time.sleep(0.6)
+
+
+def _px_recorder():
+    """Каждую ~1с сэмплит MEXC last + DEX + справедливую для СМОТРИМЫХ монет в кольцевые буферы — плотная посекундная история."""
+    while True:
+        try:
+            now = time.time()
+            watched = set()
+            for b, t in list(_DEX_WANT.items()):     # открыто в ячейке панели (gridseries dex=1 ставит для ЛЮБОЙ монеты, даже без DEX)
+                if now - t <= _PX_WATCH_SEC:
+                    watched.add(b)
+            for b, t in list(_PX_WATCH.items()):      # явно запрошено из /api/pxhist (страховка)
+                if now - t <= _PX_WATCH_SEC:
+                    watched.add(b)
+            if watched:
+                watched = set(sorted(watched)[:_PX_MAX_COINS])   # потолок числа монет (детерминированно)
+                mx = {}                               # MEXC last по base
+                mh = _EX_HIST.get("mexc")
+                if mh:
+                    with mh["lock"]:
+                        ms = mh["hist"][-1][1] if mh["hist"] else {}
+                    mx = {s.replace("_USDT", ""): v[3] for s, v in ms.items() if v and v[3]}
+                with _MXFAIR["lock"]:                 # справедливая (fair) — тот же источник, что m["mexcfair"] в _grid_series
+                    fs = _MXFAIR["hist"][-1][1] if _MXFAIR["hist"] else {}
+                fair = {s.replace("_USDT", ""): v[1] for s, v in fs.items() if v and v[1]}
+                with _DEX["lock"]:                    # on-chain цена DEX по base
+                    dex = dict(_DEX["hist"][-1][1]) if _DEX["hist"] else {}
+                cexsnaps = {}                          # доп. биржи: последний снапшот (только прогретые, у кого есть данные)
+                for f in _PX_CEX:
+                    h = _EX_HIST.get(f)
+                    if not h:
+                        continue
+                    with h["lock"]:
+                        snp = h["hist"][-1][1] if h["hist"] else {}
+                    if snp:
+                        cexsnaps[f] = snp
+                ts = round(now, 1)
+                with _PX_LOCK:
+                    for b in watched:
+                        buf = _PX.get(b)
+                        if buf is None:
+                            buf = _PX[b] = {"mexc": collections.deque(maxlen=_PX_MAXLEN),
+                                            "dex":  collections.deque(maxlen=_PX_MAXLEN),
+                                            "fair": collections.deque(maxlen=_PX_MAXLEN)}
+                        mp = mx.get(b)
+                        if mp:
+                            buf["mexc"].append((ts, mp))
+                        fp = fair.get(b)
+                        if fp:
+                            buf["fair"].append((ts, fp))
+                        hot = _PX_DEX_HOT.get(b)                       # свежая «горячая» DEX-цена (опрос ~3с) важнее снапшота (~40с)
+                        dp = hot[1] if (hot and now - hot[0] <= 15) else dex.get(b)
+                        if dp:
+                            buf["dex"].append((ts, dp))
+                        sym_u = b + "_USDT"                            # ОСНОВНЫЕ БИРЖИ посекундно (детальная история как у MEXC)
+                        for f, snp in cexsnaps.items():
+                            v = snp.get(sym_u)
+                            if v and v[3]:
+                                dq = buf.get(f)
+                                if dq is None:
+                                    dq = buf[f] = collections.deque(maxlen=_PX_MAXLEN)
+                                dq.append((ts, v[3]))
+                    if len(_PX) > _PX_MAX_COINS * 2:  # уборка буферов монет, которые давно не смотрят (память ограничена)
+                        for b in list(_PX.keys()):
+                            last_seen = max(_DEX_WANT.get(b, 0), _PX_WATCH.get(b, 0))
+                            if now - last_seen > _PX_KEEP_SEC:
+                                _PX.pop(b, None)
+        except Exception:
+            pass
+        time.sleep(1)
+
+
+def _px_hist(syms, sec):
+    """Последние `sec` секунд посекундной истории для монет → {SYM_USDT: {"mexc":[[t,p]...], "dex":[...], "fair":[...]}}."""
+    cut = time.time() - sec
+    out = {}
+    with _PX_LOCK:
+        for s in syms:
+            b = s.replace("_USDT", "")
+            _px_watch(b)                              # запрос из панели = монета смотрится → рекордер начнёт её писать
+            buf = _PX.get(b)
+            if not buf:
+                out[s] = {"mexc": [], "dex": [], "fair": []}
+                continue
+            out[s] = {k: [[t, p] for (t, p) in dq if t >= cut] for k, dq in buf.items()}   # все записанные биржи (mexc/dex/fair + осн.)
+    return out
+
+
+_PUMP_WIN = 90                                       # окно расчёта пампа/дампа, сек (движение цены «прямо сейчас»)
+
+
+def _pump_pct(ex, sym):
+    """Краткосрочное изменение цены биржи `ex` по монете `sym` за последние ~_PUMP_WIN сек (памп>0 / дамп<0)."""
+    h = _EX_HIST.get(ex)
+    if not h:
+        return 0.0
+    with h["lock"]:
+        hist = list(h["hist"])
+    if len(hist) < 2:
+        return 0.0
+    cut = hist[-1][0] - _PUMP_WIN
+    first = last = 0.0
+    for t, snap in hist:
+        v = snap.get(sym)
+        if not v or not v[3]:
+            continue
+        if t >= cut and first == 0.0:
+            first = v[3]
+        last = v[3]
+    return (last - first) / first * 100 if first > 0 and last > 0 else 0.0
+
+
 def _gap_top(exs, n, minturn, maxgap=400.0):
     """Топ монет по максимальному расхождению последней цены между биржами (авто-список для панели).
-    Фильтры от мусора: минимум ликвидности (minturn) и потолок гэпа maxgap% (гэп выше = коллизия тикеров/битая цена)."""
+    Фильтры от мусора: минимум ликвидности (minturn) и потолок гэпа maxgap% (гэп выше = коллизия тикеров/битая цена).
+    Плюс `pump` — краткосрочное движение цены (для стратегии памп-дамп: клиент требует памп + расхождение)."""
     for e in exs:
         if e in _EX_ADAPTERS:
             _ex_want(e)
@@ -1453,26 +2041,42 @@ def _gap_top(exs, n, minturn, maxgap=400.0):
     syms = set()
     for e in latest:
         syms |= set(latest[e].keys())
+    dex_snap = {}; _now = time.time()                # on-chain цены (только по монетам, что уже опрашиваются)
+    try:
+        with _DEX["lock"]:
+            if _DEX["hist"]:
+                dex_snap = dict(_DEX["hist"][-1][1])
+    except Exception:
+        pass
     rows = []
     for sym in syms:
-        px = []; turn = 0.0; exset = []; rise = 0.0; hiturn = -1.0
+        pairs = []; turn = 0.0; exset = []; rise = 0.0; hiturn = -1.0; ref_e = None
         for e in exs:
             v = latest.get(e, {}).get(sym)
             if v:
-                px.append(v[0]); exset.append(e)
-                if v[1] > hiturn:                    # 24ч-изменение берём с самой оборотистой биржи
-                    hiturn = v[1]; turn = v[1]; rise = v[2]
-        if len(px) < 2 or turn < minturn:
+                pairs.append((e, v[0])); exset.append(e)
+                if v[1] > hiturn:                    # 24ч-изменение + памп берём с самой оборотистой биржи
+                    hiturn = v[1]; turn = v[1]; rise = v[2]; ref_e = e
+        _b = sym.replace("_USDT", "")
+        dpx = dex_snap.get(_b) if _b not in _DEX_HEAVY else 0   # DEX↔биржа — СУТЬ стратегии; тяжи игнорим (там нет арбитража)
+        if dpx and dpx > 0 and pairs and (_now - _DEX_TS.get(_b, 0) <= _DEX_FRESH_SEC):   # только СВЕЖАЯ цена DEX (протухшую в спред-колл не берём)
+            pairs.append(("dex", dpx)); exset.append("dex")
+        if len(pairs) < 2 or turn < minturn:
             continue
-        mn, mx = min(px), max(px)
+        lo_e, mn = min(pairs, key=lambda x: x[1])    # биржа с минимальной ценой (дешевле)
+        hi_e, mx = max(pairs, key=lambda x: x[1])    # биржа с максимальной ценой (дороже)
         if mn <= 0:
             continue
         gap = (mx - mn) / mn * 100
         if gap > maxgap:                             # абсурдный гэп = разные токены под одним тикером / битая цена
             continue
+        pump = _pump_pct(ref_e, sym) if ref_e else 0.0   # памп/дамп «прямо сейчас» (движение ref-биржи за ~90с)
         rows.append({"symbol": sym, "gap": round(gap, 3), "turn": round(turn),
-                     "rise": round(rise * 100, 2), "ex": exset})
-    rows.sort(key=lambda r: r["gap"], reverse=True)
+                     "rise": round(rise * 100, 2), "pump": round(pump, 2), "ex": exset, "loEx": lo_e, "hiEx": hi_e})
+    rows.sort(key=lambda r: max(r["gap"], abs(r["pump"])), reverse=True)   # наверх: и сильное расхождение, И сильный памп/дамп
+    for r in rows[:_PREWARM_TOP]:                # ПРЕД-ЗАПИСЬ: топ активных монет пишем посекундно ЗАРАНЕЕ → при открытии график сразу детальный
+        _bb = r["symbol"].replace("_USDT", "")
+        _px_watch(_bb); _dex_want(_bb)
     return rows[:n]
 
 
@@ -1502,6 +2106,49 @@ def _membership_of(coin, excluded):
     """Список ex-фидов, где торгуется монета (кроме исключённых)."""
     with _EX_SYMS_LOCK:
         return [ex for ex, syms in _EX_SYMS.items() if ex not in excluded and coin in syms]
+
+
+# ── ссылки на страницу монеты по биржам (панель MEXC↔DEX: бейджи под монетой, клик = переход) ──
+_EX_URL = {
+    "mexc": "https://futures.mexc.com/exchange/{S}",          "mexcspot": "https://www.mexc.com/exchange/{S}",
+    "binance": "https://www.binance.com/en/futures/{C}",      "binancespot": "https://www.binance.com/en/trade/{S}",
+    "bybit": "https://www.bybit.com/trade/usdt/{C}",          "bybitspot": "https://www.bybit.com/en/trade/spot/{B}/USDT",
+    "okx": "https://www.okx.com/trade-swap/{L}-usdt-swap",    "okxspot": "https://www.okx.com/trade-spot/{L}-usdt",
+    "gate": "https://www.gate.io/futures_trade/USDT/{S}",     "gatespot": "https://www.gate.io/trade/{S}",
+    "bitget": "https://www.bitget.com/futures/usdt/{C}",      "bitgetspot": "https://www.bitget.com/spot/{C}",
+    "bingx": "https://bingx.com/en-us/perpetual/{B}-USDT",    "ourbit": "https://futures.ourbit.com/exchange/{S}",
+    "weex": "https://www.weex.com/futures/{B}-USDT",          "kucoin": "https://www.kucoin.com/futures/trade/{C}M",
+    "htx": "https://www.htx.com/futures/linear_swap/exchange#contract_code={B}-USDT",
+    "lbank": "https://www.lbank.com/futures/{l}usdt",         "bitmart": "https://futures.bitmart.com/en-US?symbol={C}",
+    "xt": "https://www.xt.com/en/futures/trade/{l}_usdt",     "blofin": "https://blofin.com/futures/{B}-USDT",
+    "bitunix": "https://www.bitunix.com/contract-trade/{C}",  "whitebit": "https://whitebit.com/trade/{B}-PERP",
+    "asterdex": "https://www.asterdex.com/en/futures/{C}",    "lighter": "https://app.lighter.xyz/trade/{B}",
+    "hyperliquid": "https://app.hyperliquid.xyz/trade/{B}",
+}
+
+
+def _ex_url(ex: str, sym: str) -> str:
+    """URL страницы монеты на бирже. {S}=BTC_USDT {C}=BTCUSDT {B}=BTC {L}=btc-lower {l}=btclower."""
+    t = _EX_URL.get(ex) or ""
+    if not t:
+        return ""
+    base = sym[:-5] if sym.endswith("_USDT") else sym
+    return (t.replace("{S}", sym).replace("{C}", base + "USDT")
+             .replace("{B}", base).replace("{L}", base.lower()).replace("{l}", base.lower()))
+
+
+def _mx_where(syms: list) -> dict:
+    """{sym: [[ex, url], ...]} — на каких биржах монета есть (для бейджей под монетой в панели)."""
+    out = {}
+    with _EX_SYMS_LOCK:
+        snap = {ex: s for ex, s in _EX_SYMS.items()}
+    for sym in syms:
+        rows = []
+        for ex, s in snap.items():
+            if sym in s:
+                rows.append([ex, _ex_url(ex, sym)])
+        out[sym] = rows
+    return out
 
 
 def _in_excluded(coin, excluded):
@@ -1535,7 +2182,7 @@ def _screener_top_ex(ex: str, win: float = 30.0, n: int = 40) -> list:
             prev = s; break
     rows = []
     for sym, tup in cur.items():
-        amt24, vol24, rise, last, bid, ask = tup
+        amt24, vol24, rise, last, bid, ask = tup[:6]     # snap хранит 7 полей ([6]=fairPrice для THIEF) — скринеру нужны первые 6
         o = old.get(sym)
         d_amt = max(0.0, amt24 - o[0]) if o else 0.0
         d_vol = max(0.0, vol24 - o[1]) if o else 0.0
@@ -1576,15 +2223,42 @@ def _screener_top_ex(ex: str, win: float = 30.0, n: int = 40) -> list:
         r["act"] = round(100 * r["amt"] / mam)
     rows.sort(key=lambda r: r["amt"], reverse=True)
     top = rows[:n]
-    if ex == "weex":                     # реальное число сделок WEEX из фонового сканера (топ-монеты)
-        for r in top:
-            tc = _WEEX_TR.get(r["symbol"])
-            if tc:
-                r["trades"] = tc[0]
-                r["vol"] = tc[0]
-        with _WEEX_TR_LOCK:
+    if ex == "weex":                     # число сделок WEEX из СВОЕГО WS-фида (_weex_deal_metrics) — ВСЕ монеты real-time
+        now_ms = int(time.time() * 1000)
+        cutoff = now_ms - int(win * 1000)     # win = окно в СЕКУНДАХ (win_sec)
+        for r in rows:
+            c, turn, delta = _weex_deal_metrics(r["symbol"], cutoff)
+            r["trades"] = c; r["vol"] = c
+            if turn:
+                r["amt"] = round(turn); r["dusd"] = round(delta)
+                r["dpct"] = round(delta / turn * 100, 2) if turn else 0.0
+        mam = max((r["amt"] for r in rows), default=1) or 1    # пересчёт «Активности» под оконный оборот
+        for r in rows:
+            r["act"] = round(100 * r["amt"] / mam)
+        top = sorted(rows, key=lambda r: (r["trades"], r["amt"]), reverse=True)[:n]
+        with _WEEX_TR_LOCK:                                    # кормим сканер СТЕН (для СБОР-скора) топ-монетами
             _WEEX_TR_WANT["syms"] = [r["symbol"] for r in top[:12]]
             _WEEX_TR_WANT["ts"] = time.time()
+    elif ex == "mexc":                   # число сделок MEXC из ОБЩЕГО WS-счётчика (_deal_metrics, как Ourbit) — ВСЕ монеты real-time
+        now_ms = int(time.time() * 1000)
+        cutoff = now_ms - int(win * 1000)     # win = окно в СЕКУНДАХ (win_sec)
+        for r in rows:
+            c, turn, delta = _mexc_deal_metrics(r["symbol"], cutoff)   # СВОЙ фид MEXC (включая эксклюзивы ANSEM/FARTCOIN)
+            r["trades"] = c; r["vol"] = c
+            r["amt"] = round(turn); r["dusd"] = round(delta)
+            r["dpct"] = round(delta / turn * 100, 2) if turn else 0.0
+            # СБОР-скор (стратегия Вики): жирный спред × прострелы(NATR) × свипы(всплеск),
+            # гейт по АКТИВНОСТИ ленты (сделки/окно) — сток-токены с мелким оборотом, но частыми
+            # сделками и жирным спредом = лучшие кандидаты на сбор (не режем по 24ч-обороту).
+            _spr = min(1.0, r["spread"] / 0.10)       # спред(тик)% ≥ 0.10% = жирный тик
+            _vol = min(1.0, r["natr"] / 1.8)          # NATR ≥ 1.8% = активные прострелы
+            _vsp = min(1.0, r["vspike"] / 250.0)      # всплеск ×2.5 = свипы
+            _gate = max(0.20, min(1.0, r["trades"] / 100.0))   # 100+ сделок/окно = полный вес; тихие ≥0.20
+            r["scoll"] = round(min(100.0, (0.50 * _spr + 0.30 * _vol + 0.20 * _vsp) * _gate * 100))
+        mam = max((r["amt"] for r in rows), default=1) or 1    # пересчёт «Активности» под оконный оборот
+        for r in rows:
+            r["act"] = round(100 * r["amt"] / mam)
+        top = sorted(rows, key=lambda r: (r["trades"], r["amt"]), reverse=True)[:n]   # сортировка по сделкам (все монеты известны)
     return top
 
 
@@ -1658,6 +2332,167 @@ def _deal_counter_ws():
                 await asyncio.sleep(4)
 
     asyncio.run(run())
+
+
+# ─────────── Счётчик СДЕЛОК MEXC (свой WS, contract.mexc.com/edge) — для MEXC-скринера ───────────
+# MEXC-эксклюзивы (ANSEM/FARTCOIN/сток-токены) отсутствуют на Ourbit → нужен ОТДЕЛЬНЫЙ фид MEXC.
+_MEXC_DEALS: dict = {}
+_MEXC_DEALS_LOCK = threading.Lock()
+MEXC_WS_URL = "wss://contract.mexc.com/edge"
+
+
+def _mexc_deal_metrics(sym: str, cutoff_ms: int):
+    """(кол-во сделок, оборот$, дельта$) MEXC за окно из своего WS-фида сделок."""
+    with _MEXC_DEALS_LOCK:
+        dq = _MEXC_DEALS.get(sym)
+        if not dq:
+            return (0, 0.0, 0.0)
+        cnt = 0; turn = 0.0; delta = 0.0
+        for e in reversed(dq):
+            if e[0] >= cutoff_ms:
+                cnt += 1; turn += e[1]; delta += e[2]
+            else:
+                break
+    return (cnt, turn, delta)
+
+
+def _mexc_deal_counter_ws():
+    import asyncio
+    try:
+        import websockets
+    except ImportError:
+        return
+
+    async def run():
+        while True:
+            try:
+                if time.time() - _SCR_LAST[0] > 120:          # MEXC-скринер закрыт → не держим соединение
+                    await asyncio.sleep(5); continue
+                _mexc_instruments()
+                csz = dict(_MEXC_INSTR.get("csize") or {})
+                syms = list(csz.keys())
+                if not syms:
+                    await asyncio.sleep(3); continue
+                async with websockets.connect(MEXC_WS_URL, open_timeout=15, ping_interval=20, ping_timeout=15, max_queue=None, **_ws_kw()) as ws:
+                    for s in syms:
+                        await ws.send(json.dumps({"method": "sub.deal", "param": {"symbol": s}}))
+                        await asyncio.sleep(0.003)
+                    print(f"[mexc-deals-ws] подписка на {len(syms)} монет MEXC — счётчик сделок для скринера")
+                    while True:
+                        if time.time() - _SCR_LAST[0] > 120:  # ушли со скринера → закрыть соединение (разгрузка)
+                            break
+                        msg = await asyncio.wait_for(ws.recv(), timeout=40)
+                        d = json.loads(msg)
+                        if d.get("channel") != "push.deal":
+                            continue
+                        sym = d.get("symbol")
+                        data = d.get("data")
+                        deals = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
+                        for dt in deals:
+                            t = dt.get("t") or d.get("ts")
+                            if not (sym and t):
+                                continue
+                            try:
+                                p = float(dt.get("p") or 0); v = float(dt.get("v") or 0); side = int(dt.get("T") or 1)
+                            except (TypeError, ValueError):
+                                p = v = 0.0; side = 1
+                            notional = p * v * float(csz.get(sym, 1) or 1)
+                            sign = notional if side == 1 else -notional
+                            with _MEXC_DEALS_LOCK:
+                                dq = _MEXC_DEALS.get(sym)
+                                if dq is None:
+                                    dq = _MEXC_DEALS[sym] = collections.deque(maxlen=6000)
+                                dq.append((int(t), notional, sign))
+            except Exception:
+                await asyncio.sleep(4)
+
+    asyncio.run(run())
+
+
+# ─────────── Счётчик СДЕЛОК WEEX (свой WS, ws-contract.weex.com) — ВСЕ монеты для WEEX-скринера ───────────
+_WEEX_DEALS: dict = {}
+_WEEX_DEALS_LOCK = threading.Lock()
+
+
+def _weex_deal_metrics(sym: str, cutoff_ms: int):
+    """(кол-во сделок, оборот$, дельта$) WEEX за окно из своего WS-фида сделок (v уже в USD)."""
+    with _WEEX_DEALS_LOCK:
+        dq = _WEEX_DEALS.get(sym)
+        if not dq:
+            return (0, 0.0, 0.0)
+        cnt = 0; turn = 0.0; delta = 0.0
+        for e in reversed(dq):
+            if e[0] >= cutoff_ms:
+                cnt += 1; turn += e[1]; delta += e[2]
+            else:
+                break
+    return (cnt, turn, delta)
+
+
+def _weex_deal_counter_ws():
+    import asyncio
+    import json as J
+    try:
+        import websockets
+    except ImportError:
+        return
+
+    async def run():
+        while True:
+            try:
+                if time.time() - _SCR_LAST[0] > 120:          # WEEX-скринер закрыт → не держим соединение
+                    await asyncio.sleep(5); continue
+                bases = list(_weex_syms())
+                if not bases:
+                    await asyncio.sleep(3); continue
+                streams = [b + "USDT@trade" for b in bases]
+                async with websockets.connect("wss://ws-contract.weex.com/v3/ws/public", open_timeout=10, ping_interval=None) as ws:
+                    for i in range(0, len(streams), 30):      # батчами (лимит params в одном сообщении)
+                        await ws.send(J.dumps({"method": "SUBSCRIBE", "params": streams[i:i + 30], "id": 1}))
+                        await asyncio.sleep(0.06)
+                    print(f"[weex-deals-ws] подписка на {len(streams)} монет WEEX — счётчик сделок для скринера")
+                    while True:
+                        if time.time() - _SCR_LAST[0] > 120:  # ушли со скринера → закрыть
+                            break
+                        try:
+                            m = await asyncio.wait_for(ws.recv(), timeout=15)
+                        except asyncio.TimeoutError:
+                            try: await ws.send(J.dumps({"method": "PONG", "id": 1}))
+                            except Exception: pass
+                            continue
+                        try: d = J.loads(m)
+                        except Exception: continue
+                        if d.get("event") in ("ping", "pong") or d.get("type") == "ping":
+                            try: await ws.send(J.dumps({"method": "PONG", "id": 1}))
+                            except Exception: pass
+                            continue
+                        if str(d.get("e") or "").lower() != "trade":   # только живые сделки (не tradeSnapshot — не раздуваем окно)
+                            continue
+                        s = d.get("s") or ""
+                        if not s.endswith("USDT"):
+                            continue
+                        sym = s[:-4] + "_USDT"
+                        for t in (d.get("d") or []):
+                            try:
+                                T = int(t.get("T") or 0)
+                                notional = float(t.get("v") or 0)     # v уже в USD (цена×кол-во)
+                                side = 2 if str(t.get("m")).lower() == "true" else 1
+                            except (TypeError, ValueError):
+                                continue
+                            if not T:
+                                continue
+                            sign = notional if side == 1 else -notional
+                            with _WEEX_DEALS_LOCK:
+                                dq = _WEEX_DEALS.get(sym)
+                                if dq is None:
+                                    dq = _WEEX_DEALS[sym] = collections.deque(maxlen=6000)
+                                dq.append((T, notional, sign))
+            except Exception:
+                await asyncio.sleep(4)
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(run())
 
 
 # ─────────── WS-фид Ourbit: живая книга (снапшот REST + диффы) + лента ───────────
@@ -1817,6 +2652,7 @@ def _start_ws():
 _STATIC = {"/app.js": "application/javascript; charset=utf-8",
            "/trade.js": "application/javascript; charset=utf-8",
            "/chart.js": "application/javascript; charset=utf-8",
+           "/classic.js": "application/javascript; charset=utf-8",
            "/screener.js": "application/javascript; charset=utf-8",
            "/mxdex.js": "application/javascript; charset=utf-8",
            "/tape.js": "application/javascript; charset=utf-8",
@@ -2026,12 +2862,77 @@ class Handler(BaseHTTPRequestHandler):
                 except (TypeError, ValueError):
                     n, minturn, maxgap = 20, 50000.0, 400.0
                 self._json({"ok": True, "rows": _gap_top(exs, n, minturn, maxgap)})
+            elif route == "/api/classic/alerts":                 # КЛАССИКА: свежие алерты формаций (since=последний виденный id)
+                if not _classic:
+                    self._json({"ok": False, "error": "модуль classic не загружен"}); return
+                try:
+                    since = int((qs.get("since") or ["0"])[0])
+                except (TypeError, ValueError):
+                    since = 0
+                self._json(_classic.alerts_since(since))
+            elif route == "/api/classic/chart":                  # КЛАССИКА: свечи+уровни+наклонки монеты для графика
+                if not _classic:
+                    self._json({"ok": False, "error": "модуль classic не загружен"}); return
+                self._json(_classic.chart((qs.get("symbol") or ["BTCUSDT"])[0], (qs.get("tf") or ["5m"])[0]))
             elif route == "/api/mxsyms":                         # список монет для поиска в ячейках панели MEXC↔DEX
                 with _EX_SYMS_LOCK:
                     allsyms = set()
                     for _sy in _EX_SYMS.values():
                         allsyms |= _sy
                 self._json({"ok": True, "syms": sorted(s.replace("_USDT", "") for s in allsyms)[:6000]})
+            elif route == "/api/mxwhere":                        # на каких биржах есть монета (+ссылки) — бейджи под монетой
+                syms = [s.strip().upper() for s in (qs.get("symbols") or [""])[0].split(",") if s.strip()][:80]
+                self._json({"ok": True, "where": _mx_where(syms)})
+            elif route == "/api/dexmap":                         # ручной оверрайд контракта/пары DEX (как в THIEF)
+                b = (qs.get("base") or [""])[0].strip().upper().replace("_USDT", "")
+                ca = (qs.get("ca") or [""])[0].strip()
+                chain = (qs.get("chain") or [""])[0].strip().lower()
+                pair = (qs.get("pair") or [""])[0].strip()
+                if b:
+                    if pair and chain:
+                        _DEX_MAP[b] = {"chain": chain, "pair": pair, "addr": ca}
+                    elif ca:
+                        _DEX_MAP.pop(b, None); _dex_resolve(b, ca=ca)   # резолв по контракту
+                    _dex_save_map()
+                self._json({"ok": True, "map": _DEX_MAP.get(b)})
+            elif route == "/api/mxliq":                          # L: сколько $ можно зайти на MEXC до сдвига цены на pct%
+                syms = [s.strip().upper() for s in (qs.get("symbols") or [""])[0].split(",") if s.strip()][:12]
+                try:
+                    pct = float((qs.get("pct") or ["0.5"])[0])
+                except (TypeError, ValueError):
+                    pct = 0.5
+                self._json({"ok": True, "liq": {s: _mx_liq(s, pct) for s in syms}})
+            elif route == "/api/mxkline":                        # история цены MEXC (для окна 1ч/4ч)
+                syms = [s.strip().upper() for s in (qs.get("symbols") or [""])[0].split(",") if s.strip()][:12]
+                try:
+                    minutes = max(30, min(1440, int((qs.get("minutes") or ["240"])[0])))
+                except (TypeError, ValueError):
+                    minutes = 240
+                self._json({"ok": True, "kline": {s: _mx_kline(s, minutes) for s in syms}})
+            elif route == "/api/dexkline":                       # история цены DEX-пула (полная линия DEX)
+                syms = [s.strip().upper() for s in (qs.get("symbols") or [""])[0].split(",") if s.strip()][:12]
+                try:
+                    minutes = max(30, min(1440, int((qs.get("minutes") or ["240"])[0])))
+                except (TypeError, ValueError):
+                    minutes = 240
+                self._json({"ok": True, "kline": {s: _dex_kline(s.replace("_USDT", ""), minutes) for s in syms}})
+            elif route == "/api/dexohlc":                        # OHLC-свечи DEX-пула (свечной график) → [[t,o,h,l,c]]
+                syms = [s.strip().upper() for s in (qs.get("symbols") or [""])[0].split(",") if s.strip()][:12]
+                try:
+                    minutes = max(30, min(1440, int((qs.get("minutes") or ["240"])[0])))
+                except (TypeError, ValueError):
+                    minutes = 240
+                self._json({"ok": True, "kline": {s: _dex_ohlc(s.replace("_USDT", ""), minutes) for s in syms}})
+            elif route == "/api/dextrades":                      # ПОСВОПОВАЯ цена DEX (каждая сделка) → детальная линия
+                syms = [s.strip().upper() for s in (qs.get("symbols") or [""])[0].split(",") if s.strip()][:12]
+                self._json({"ok": True, "trades": {s: _dex_trades(s.replace("_USDT", "")) for s in syms}})
+            elif route == "/api/pxhist":                         # ПЛОТНАЯ посекундная история цен (MEXC/DEX/fair) для панели
+                syms = [s.strip().upper() for s in (qs.get("symbols") or [""])[0].split(",") if s.strip()][:12]
+                try:
+                    sec = max(30, min(_PX_MAXLEN, int((qs.get("sec") or ["3600"])[0])))
+                except (TypeError, ValueError):
+                    sec = 3600
+                self._json({"ok": True, "hist": _px_hist(syms, sec)})
             elif route == "/api/screener":
                 try:
                     win = float((qs.get("win") or ["1"])[0])          # окно в МИНУТАХ (M1..M60)
@@ -2409,7 +3310,14 @@ class Handler(BaseHTTPRequestHandler):
                             close_pid = match["id"]
                             if match.get("vol"): vol = min(vol, int(match["vol"]))
                     _t0 = time.time()
-                    sc, resp = _MEXCTR.create(sym, side, otype, vol, b.get("price", 0), int(b.get("leverage", 20)), position_id=close_pid)
+                    lev = min(int(b.get("leverage", 20)), _mexc_maxlev(sym))   # обрезать плечо до максимума контракта (VANRY=20) — иначе MEXC «leverage adjusted»
+                    sc, resp = _MEXCTR.create(sym, side, otype, vol, b.get("price", 0), lev, position_id=close_pid)
+                    if not (isinstance(resp, dict) and resp.get("success")):   # ЛОГ отказа MEXC (диагностика)
+                        try:
+                            with open(os.path.join(HERE, "mexc_order_log.txt"), "a", encoding="utf-8") as _lf:
+                                _lf.write(f"{time.strftime('%H:%M:%S')} REJECT sym={sym} side={side} vol={vol} lev={lev} px={b.get('price')} resp={json.dumps(resp, ensure_ascii=False)}\n")
+                        except Exception:
+                            pass
                     self._json({"ok": bool(resp.get("success")), "http": sc, "resp": resp,
                                 "srv_ms": round((time.time() - _t0) * 1000)})
                 except Exception as exc:
@@ -2438,6 +3346,10 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"ok": True, "killed": killed, "failed": failed})
                 except Exception as exc:
                     self._json({"ok": False, "error": str(exc)})
+            elif route == "/api/classic/cfg":       # КЛАССИКА: настройки сканера (мин.объём, топ-N, шорты)
+                if not _classic:
+                    self._json({"ok": False, "error": "модуль classic не загружен"}); return
+                self._json(_classic.set_cfg(b))
             elif route == "/api/autostop":          # тумблер: ставить ли биржевой SL/TP автоматически
                 _TRADE["auto_stop"] = bool(b.get("on"))
                 self._json({"ok": True, "auto_stop": _TRADE["auto_stop"]})
@@ -2508,12 +3420,32 @@ def main():
     threading.Thread(target=_mxfair_poll, daemon=True, name="mxfair").start()
     _dex_load_map()
     threading.Thread(target=_dex_poll, daemon=True, name="dex-onchain").start()
+    threading.Thread(target=_dex_seed, daemon=True, name="dex-seed").start()      # авто-посев контрактов (лента наполняется сама)
+    threading.Thread(target=_px_recorder, daemon=True, name="px-recorder").start()  # посекундный рекордер цен → плотная история панели
+    threading.Thread(target=_px_dex_hot, daemon=True, name="px-dex-hot").start()     # частый опрос DEX для открытых монет → плотная DEX-линия
     threading.Thread(target=_autoconnect_ourbit, daemon=True, name="ourbit-autoconnect").start()   # подхватить сохранённый токен Ourbit
     threading.Thread(target=_fee_watchdog, daemon=True, name="fee-watchdog").start()
     threading.Thread(target=_conn_keepalive, daemon=True, name="conn-keepalive").start()
     threading.Thread(target=_deal_counter_ws, daemon=True, name="deals-ws").start()
+    threading.Thread(target=_mexc_deal_counter_ws, daemon=True, name="mexc-deals-ws").start()
+    threading.Thread(target=_weex_deal_counter_ws, daemon=True, name="weex-deals-ws").start()
     if _proxy:
         threading.Thread(target=_proxy.health_loop, daemon=True, name="proxy-health").start()
+    if _classic:
+        def _classic_fetch(url, timeout=15):     # Классика ходит через ту же proxy-aware сессию (обходит бан IP при прокси)
+            r = _get(url, timeout=timeout)
+            sc = getattr(r, "status_code", 200)
+            if sc in (418, 429):
+                try:
+                    wait = int(r.headers.get("Retry-After") or 120)
+                except (TypeError, ValueError):
+                    wait = 120
+                _BINANCE_BAN[0] = time.time() + min(max(wait, 60), 1800)
+                _classic.set_ban(_BINANCE_BAN[0])
+                raise RuntimeError("binance %s ban" % sc)
+            return r.json()
+        _classic.set_fetcher(_classic_fetch)
+        threading.Thread(target=_classic.scanner, daemon=True, name="classic-scanner").start()
     _start_ws()
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"Ourbit DOM (MetaScalp-style) запущен:  http://localhost:{PORT}")

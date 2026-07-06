@@ -8,50 +8,71 @@
    ========================================================================== */
 (function () {
   const g = (id) => document.getElementById(id);
-  const LS = "mxdex.cfg.v3";
+  const LS = "mxdex.cfg.v4";                          // v4: старт MEXC↔DEX (сброс старых настроек бирж)
   const POLL_MS = 1000;                               // как часто тянем свежие цены
   const THRESH = [2.5, 5, 8, 10, 15, 20, 30, 50];     // пороги спред-колла, %
-  const WINS = [[30, "30с"], [60, "1м"], [120, "2м"], [300, "5м"], [600, "10м"], [1800, "30м"]];
+  const RE_ALERT_MS = 10 * 60 * 1000;                 // спред ДЕРЖИТСЯ → повторный сигнал не чаще раза в 10 мин
+  const GONE_RESET_MS = 3 * 60 * 1000;                // спред ПРОПАЛ на 3+ мин → сброс (новое появление = новый разрыв = сигнал)
+  const ACTIVITY_MIN = 0.6;                           // % движения за ~90с — с этого показываем значок 🚀/🔻 в ленте (сам АЛЕРТ требует ≥ CFG.thresh)
+  const WINS =[[30, "30с"], [60, "1м"], [120, "2м"], [300, "5м"], [600, "10м"], [1800, "30м"], [3600, "1ч"], [14400, "4ч"], [86400, "24ч"]];
 
-  const SRC = [
-    { lbl: "MEXC", c: "#3ac6e6", f: "mexc" },
-    { lbl: "BINANCE", c: "#f0b90b", f: "binance", s: "binancespot" },
-    { lbl: "BYBIT", c: "#f7a600", f: "bybit" },
-    { lbl: "GATE", c: "#e6446e", f: "gate" },
-    { lbl: "BITGET", c: "#00e0c6", f: "bitget" },
-    { lbl: "BINGX", c: "#2a5bd7", f: "bingx" },
-    { lbl: "OKX", c: "#c9cdd4", f: "okx" },
-    { lbl: "OURBIT", c: "#16c784", f: "ourbit" },
-    { lbl: "ASTER", c: "#9d7bff", f: "asterdex" },
-    { lbl: "LIGHTER", c: "#b8c0cc", f: "lighter" },
-    { lbl: "HL", c: "#4be3c0", f: "hyperliquid" },
+  const SRC = [                                        // fx = справедливая (mark) цена — буква «Ф» ПОД биржей (есть где API отдаёт mark в тикере)
+    { lbl: "MEXC", c: "#16c784", f: "mexc", s: "mexcspot", fx: "mexcfair" },     // зелёный (фикс)
+    { lbl: "BINANCE", c: "#f5b800", f: "binance", s: "binancespot" },           // золотой
+    { lbl: "BYBIT", c: "#ff7f0e", f: "bybit", s: "bybitspot", fx: "bybitfair" }, // оранжевый
+    { lbl: "GATE", c: "#e6446e", f: "gate", s: "gatespot", fx: "gatefair" },     // малиновый
+    { lbl: "BITGET", c: "#17becf", f: "bitget", s: "bitgetspot", fx: "bitgetfair" }, // циан
+    { lbl: "OKX", c: "#9aa7b4", f: "okx", s: "okxspot" },                        // серый
+    { lbl: "BINGX", c: "#1f77ff", f: "bingx" },                                  // синий
+    { lbl: "OURBIT", c: "#e377c2", f: "ourbit" },                                // розовый
+    { lbl: "ASTER", c: "#5a4fcf", f: "asterdex" },                               // индиго
+    { lbl: "LIGHTER", c: "#8c564b", f: "lighter" },                             // коричневый
+    { lbl: "HL", c: "#bcbd22", f: "hyperliquid" },                             // оливковый
   ];
   const SPECIAL = [
-    { lbl: "FAIR·MEXC", c: "#e6c84a", id: "mexcfair", title: "справедливая цена MEXC (fairPrice)" },
-    { lbl: "DEX·CA", c: "#e259c6", id: "dex", title: "on-chain цена по контракту (Dexscreener)" },
+    { lbl: "DEX·CA", c: "#a64dff", id: "dex", title: "on-chain цена по контракту (Dexscreener)" },   // фиолетовый (фикс)
   ];
-  const COL = { mexc: "#3ac6e6", binance: "#f0b90b", binancespot: "#f0d24b", bybit: "#f7a600",
-    gate: "#e6446e", bitget: "#00e0c6", bingx: "#2a5bd7", okx: "#c9cdd4", ourbit: "#16c784",
-    asterdex: "#9d7bff", lighter: "#b8c0cc", hyperliquid: "#4be3c0", mexcfair: "#e6c84a", dex: "#e259c6" };
-  const LBL = { mexc: "MEXC", binance: "BINANCE·F", binancespot: "BINANCE·S", bybit: "BYBIT",
-    gate: "GATE", bitget: "BITGET", bingx: "BINGX", okx: "OKX", ourbit: "OURBIT",
-    asterdex: "ASTER", lighter: "LIGHTER", hyperliquid: "HL", mexcfair: "FAIR", dex: "DEX·CA" };
+  const COL = { mexc: "#16c784", binance: "#f5b800", binancespot: "#f5d24b", bybit: "#ff7f0e",
+    gate: "#e6446e", bitget: "#17becf", bingx: "#1f77ff", okx: "#9aa7b4", ourbit: "#e377c2",
+    asterdex: "#5a4fcf", lighter: "#8c564b", hyperliquid: "#bcbd22", mexcfair: "#e6c84a", dex: "#a64dff",
+    mexcspot: "#6fe0a8", bybitspot: "#ffb066", gatespot: "#f08ba6", bitgetspot: "#7fe0ea", okxspot: "#cfd6de",
+    bybitfair: "#ff7f0e", gatefair: "#e6446e", bitgetfair: "#17becf" };   // справедливые — цвет биржи, рисуются ПУНКТИРОМ
+  const LBL = { mexc: "MEXC·F", binance: "BINANCE·F", binancespot: "BINANCE·S", bybit: "BYBIT·F",
+    gate: "GATE·F", bitget: "BITGET·F", bingx: "BINGX", okx: "OKX·F", ourbit: "OURBIT",
+    asterdex: "ASTER", lighter: "LIGHTER", hyperliquid: "HL", mexcfair: "FAIR", dex: "DEX·CA",
+    mexcspot: "MEXC·S", bybitspot: "BYBIT·S", gatespot: "GATE·S", bitgetspot: "BITGET·S", okxspot: "OKX·S",
+    bybitfair: "BYBIT·Ф", gatefair: "GATE·Ф", bitgetfair: "BITGET·Ф" };
 
-  const DEF = { ex: ["mexc", "binance", "bybit", "asterdex", "mexcfair"], sound: true,
+  const DEF = { ex: ["mexc", "dex", "mexcfair"], sound: true,           // старт: MEXC ↔ DEX (арбитраж on-chain vs биржа)
     cards: ["VANRY_USDT", "GWEI_USDT", "OPENAI_USDT", "ANTHROPIC_USDT"],
-    windowSec: 120, thresh: 2.5, pinned: [], minturn: 20000, maxgap: 600,
-    cols: 3, cellH: 210, lw: 1.2, feedW: 198 };
+    windowSec: 120, thresh: 4, pinned: [], minturn: 3000, maxgap: 300,   // thresh — ЕДИНЫЙ порог: спред ≥ % И памп/дамп ≥ % одновременно
+    cols: 3, cellH: 210, lw: 0.8, feedW: 198 };
+  const isSpot = (e) => !!e && e.endsWith("spot");                     // спотовые фиды — Вика их НЕ торгует (в уведомления не берём)
 
   let CFG = load();
   const BUF = {};                    // "sym::ex" -> [[t,price]] клиентский буфер (плавная живая линия)
-  const ACTIVE = {};                 // sym -> {sym,gap,rise,ex,bucket,t} живой список монет со спредом ≥ порога
+  const ACTIVE = {};                 // sym -> {bucket} — трекинг пробоя порога (для дедупа алертов)
+  const LOG_LS = "mxdex.log.v1", LOG_MAX = 60;
+  let FEEDLOG = loadLog();            // ИСТОРИЯ спред-коллов (копится, не сбрасывается, хранится в localStorage)
+  function loadLog() { try { const j = JSON.parse(localStorage.getItem(LOG_LS)); if (Array.isArray(j)) return j.slice(0, LOG_MAX); } catch (e) {} return []; }
+  function saveLog() { try { localStorage.setItem(LOG_LS, JSON.stringify(FEEDLOG.slice(0, LOG_MAX))); } catch (e) {} }
+  function pushLog(ev) { FEEDLOG.unshift(ev); if (FEEDLOG.length > LOG_MAX) FEEDLOG.length = LOG_MAX; saveLog(); }
   let SYMS = [];                     // список монет для поиска в ячейках
   const PINDATA = {};                // sym -> {gap,rise}
   let META = {};                     // sym -> {ex:{last,turn,rise}} свежие цены
+  const LIQ = {};                    // sym -> $ ликвидности MEXC (сколько можно зайти до сдвига 0.5%)
+  const CELLWIN = {};                // sym -> своё окно графика (колесо крутит ТОЛЬКО свою ячейку, не все)
+  const SEEDED = {};                 // sym -> окно (сек), на которое УЖЕ подтянута история (новая монета/зум шире → сид СРАЗУ, не ждать циклов)
+  const WHERE = {};                  // sym -> [[ex,url],...] на каких биржах монета есть (бейджи под монетой, клик = переход)
+  const CELLFEEDS = {};              // sym -> [loEx,hiEx] биржи, где у монеты РЕАЛЬНЫЙ спред → их линии рисуем в ячейке (даже если тумблер выкл)
+  const WORDER = ["mexc", "binance", "bybit", "okx", "gate", "bitget", "bingx", "ourbit", "weex", "kucoin", "asterdex", "hyperliquid", "lighter",
+    "htx", "lbank", "bitmart", "xt", "blofin", "bitunix", "whitebit", "mexcspot", "binancespot", "bybitspot", "gatespot", "okxspot", "bitgetspot"];   // порядок: тяжи сперва
+  const winOf = (sym) => CELLWIN[sym] || CFG.windowSec;
+  const maxWin = () => { let m = CFG.windowSec; for (const s in CELLWIN) if (CELLWIN[s] > m) m = CELLWIN[s]; return m; };
   let timer = null, raf = null, firstScan = true;
   const win = () => g("mxwin");
 
-  function load() { try { const j = JSON.parse(localStorage.getItem(LS)); if (j) return Object.assign({}, DEF, j, { ex: j.ex || DEF.ex, cards: j.cards || DEF.cards, pinned: j.pinned || [] }); } catch (e) {} return JSON.parse(JSON.stringify(DEF)); }
+  function load() { try { const j = JSON.parse(localStorage.getItem(LS)); if (j) return Object.assign({}, DEF, j, { ex: j.ex || DEF.ex, cards: j.cards || DEF.cards, pinned: j.pinned || [], minturn: DEF.minturn, maxgap: DEF.maxgap }); } catch (e) {} return JSON.parse(JSON.stringify(DEF)); }
   function save() { try { localStorage.setItem(LS, JSON.stringify(CFG)); } catch (e) {} }
   const has = (id) => CFG.ex.indexOf(id) >= 0;
   function toggle(id) { const i = CFG.ex.indexOf(id); if (i >= 0) CFG.ex.splice(i, 1); else CFG.ex.push(id); save(); }
@@ -68,12 +89,13 @@
   function chime(strong) {
     if (!CFG.sound) return;
     try { AC = AC || new (window.AudioContext || window.webkitAudioContext)(); if (AC.state === "suspended") AC.resume();
-      const t0 = AC.currentTime, notes = strong ? [783.99, 1046.5, 1567.98] : [659.25, 987.77];
+      const t0 = AC.currentTime, notes = strong ? [587.33, 880.0] : [659.25, 523.25];   // мягкое, тёплое двузвучие
       notes.forEach((f, i) => { const o = AC.createOscillator(), gg = AC.createGain();
         o.type = "sine"; o.frequency.value = f; o.connect(gg); gg.connect(AC.destination);
-        const t = t0 + i * 0.10; gg.gain.setValueAtTime(0.0001, t);
-        gg.gain.exponentialRampToValueAtTime(0.15, t + 0.02); gg.gain.exponentialRampToValueAtTime(0.0001, t + 0.45);
-        o.start(t); o.stop(t + 0.47); });
+        const t = t0 + i * 0.13; gg.gain.setValueAtTime(0.0001, t);
+        gg.gain.exponentialRampToValueAtTime(0.075, t + 0.04);                            // тише
+        gg.gain.exponentialRampToValueAtTime(0.0001, t + 0.75);                           // дольше, мягкий хвост
+        o.start(t); o.stop(t + 0.78); });
     } catch (e) {}
   }
 
@@ -81,10 +103,11 @@
   function renderBar() {
     const bar = g("mxbar"); if (!bar) return;
     let h = SRC.map((sr) => {
-      const letter = (kind, id) => id
-        ? '<span class="mxsf' + (has(id) ? " on" : "") + '" data-id="' + id + '" style="--exc:' + sr.c + '" title="' + (kind === "S" ? "спот" : "фьюч") + '">' + kind + '</span>'
+      const letter = (kind, id, tip) => id
+        ? '<span class="mxsf' + (has(id) ? " on" : "") + '" data-id="' + id + '" style="--exc:' + sr.c + '" title="' + tip + '">' + kind + '</span>'
         : '<span class="mxsf dis" title="фид не подключён">' + kind + '</span>';
-      return '<span class="mxsrc"><span class="mxsrclbl" style="--exc:' + sr.c + '">' + sr.lbl + '</span>' + letter("S", sr.s) + letter("F", sr.f) + '</span>';
+      return '<span class="mxsrc v"><span class="mxsrclbl" style="--exc:' + sr.c + '">' + sr.lbl + '</span><span class="mxsfrow">' +
+        letter("S", sr.s, "спот") + letter("F", sr.f, "фьюч") + letter("Ф", sr.fx, "справедливая (mark) цена биржи") + '</span></span>';
     }).join("");
     h += SPECIAL.map((sp) => '<span class="mxsrc"><span class="mxsf' + (has(sp.id) ? " on" : "") + '" data-id="' + sp.id + '" style="--exc:' + sp.c + ';border-left:0;padding:0 9px" title="' + sp.title + '">' + sp.lbl + '</span></span>').join("");
     bar.innerHTML = h;
@@ -95,7 +118,7 @@
   function renderZoom() {
     const z = g("mxzoom"); if (!z) return;
     z.innerHTML = WINS.map((w) => '<button class="mxzb' + (CFG.windowSec === w[0] ? " on" : "") + '" data-w="' + w[0] + '">' + w[1] + '</button>').join("");
-    z.querySelectorAll(".mxzb").forEach((b) => { b.onclick = () => { CFG.windowSec = +b.dataset.w; save(); renderZoom(); }; });
+    z.querySelectorAll(".mxzb").forEach((b) => { b.onclick = () => { CFG.windowSec = +b.dataset.w; for (const s in CELLWIN) delete CELLWIN[s]; save(); renderZoom(); }; });   // кнопка = общее окно для всех (сброс индивидуальных)
   }
 
   // ── попап настроек сетки ──
@@ -112,7 +135,7 @@
     const st = g("mxstat");
     try {
       s.classList.remove("hidden"); s.style.display = "";
-      const hh = s.querySelector(".mxseth"); if (hh && hh.childNodes[0]) hh.childNodes[0].nodeValue = "Настройки сетки · v186  ";   // видно версию при открытии
+      const hh = s.querySelector(".mxseth"); if (hh && hh.childNodes[0]) hh.childNodes[0].nodeValue = "Настройки сетки · v232  ";   // видно версию при открытии
       s.onmousedown = (e) => e.stopPropagation();     // не отдавать mousedown драгу окна — иначе клики внутри «съедаются»
       const xb = g("mxset-x"); if (xb) { xb.onmousedown = (e) => { e.preventDefault(); e.stopPropagation(); closeSettings(); }; xb.onclick = closeSettings; }
       document.addEventListener("keydown", onSetKey);
@@ -124,42 +147,67 @@
     } catch (e) { if (st) { st.textContent = "НАСТР.ОШИБКА: " + (e && e.message || e); st.style.color = "#ef5f5a"; } }
   }
 
-  // ── лента спред-коллов: живой список монет со спредом ≥ порога ──
-  function alertChime(sym, gap, bucket) {
+  // ── лента коллов: расхождение между биржами (+DEX) ИЛИ памп/дамп ≥ порога. Споты не берём. ──
+  function alertChime(ev, bucket) {
     chime(bucket >= 15);
-    try { if (typeof notify === "function") notify("Спред " + sym.replace("_USDT", "") + " Δ" + gap.toFixed(1) + "%", bucket >= 15 ? "warn" : "info"); } catch (e) {}
+    const base = ev.sym.replace("_USDT", "");
+    const pair = (ev.loEx && ev.hiEx) ? " · " + (LBL[ev.loEx] || ev.loEx) + " → " + (LBL[ev.hiEx] || ev.hiEx) : "";
+    const pumpTxt = (Math.abs(ev.pump || 0) >= ACTIVITY_MIN) ? " · " + (ev.pump >= 0 ? "🚀памп +" : "🔻дамп ") + ev.pump.toFixed(1) + "%" : "";
+    try { if (typeof notify === "function") notify(base + " Δ" + (ev.gap || 0).toFixed(1) + "%" + pair + pumpTxt, bucket >= 15 ? "warn" : "info"); } catch (e) {}
   }
   function processRows(rows) {
     const nowT = Date.now(), seen = new Set();
     for (const r of rows) {
-      if (r.gap < CFG.thresh) continue;
+      if (isSpot(r.loEx) || isSpot(r.hiEx)) continue;                           // спот-пару вообще не рассматриваем (Вика спот не торгует)
+      const mv = Math.abs(r.pump || 0);                                         // памп/дамп монеты за ~90с (АКТИВНОСТЬ)
+      // ОДИН ПОРОГ на оба: сигнал = расхождение ≥ порога И памп/дамп ≥ порога (оба сразу) → монета активна, график НЕ стоит.
+      if (r.gap < CFG.thresh || mv < CFG.thresh) continue;
       seen.add(r.symbol);
-      const b = bucketOf(r.gap), cur = ACTIVE[r.symbol];
-      if (!cur) { ACTIVE[r.symbol] = { sym: r.symbol, gap: r.gap, rise: r.rise, ex: r.ex, bucket: b, t: nowT };
-        if (!firstScan) alertChime(r.symbol, r.gap, b); }                       // новая монета вошла в спред
-      else { const up = b > cur.bucket; cur.gap = r.gap; cur.rise = r.rise; cur.ex = r.ex; cur.bucket = b;
-        if (up && !firstScan) alertChime(r.symbol, r.gap, b); }                 // пробила порог выше
+      const inten = Math.max(r.gap, Math.abs(r.pump || 0)), b = bucketOf(inten), prev = ACTIVE[r.symbol];
+      // сигнал: 1) НОВЫЙ колл  2) пробой более ВЫСОКОГО порога интенсивности  3) держится ≥10 мин с прошлого сигнала
+      const isNew = !prev, escal = prev && b > prev.bucket;
+      const repeat = prev && nowT - (prev.al || prev.t) >= RE_ALERT_MS;
+      const fire = isNew || escal || repeat;
+      const bucket = prev ? Math.max(prev.bucket, b) : b;                       // порог ЗАЛИПАЕТ на максимуме → колебания у порога не спамят
+      ACTIVE[r.symbol] = { bucket: bucket, t: (isNew || escal) ? nowT : prev.t,
+        al: fire ? nowT : (prev.al || prev.t), gone: 0 };                       // al = время последнего сигнала (кулдаун 10 мин)
+      if (fire && !firstScan) {                                                 // ПИШЕМ в историю (копится, не удаляется)
+        const ev = { sym: r.symbol, gap: r.gap, pump: r.pump || 0, rise: r.rise, loEx: r.loEx, hiEx: r.hiEx, bucket: b, t: nowT };
+        pushLog(ev); alertChime(ev, b);
+      }
     }
-    for (const sym in ACTIVE) if (!seen.has(sym)) delete ACTIVE[sym];           // спред сжался — убрать из ленты
+    for (const sym in ACTIVE) {                                                 // монета ушла из спреда → сброс ТОЛЬКО после 3 мин отсутствия:
+      if (seen.has(sym)) continue;                                             // мелкий провал у порога не считается «новым разрывом»,
+      const a = ACTIVE[sym];                                                    // а настоящее исчезновение (3+ мин) → возврат = новый сигнал
+      if (!a.gone) a.gone = nowT; else if (nowT - a.gone > GONE_RESET_MS) delete ACTIVE[sym];
+    }
     firstScan = false;
   }
   function gapClass(b) { return b >= 50 ? "g50" : b >= 30 ? "g30" : b >= 20 ? "g20" : b >= 15 ? "g15" : b >= 10 ? "g10" : b >= 8 ? "g8" : b >= 5 ? "g5" : ""; }
-  function feedRow(sym, gap, rise, tstr, pinned, ex) {
-    const base = sym.replace("_USDT", ""), b = bucketOf(gap), col = COL[(ex && ex[0]) || "mexc"] || "#8a929c";
-    return '<div class="mxrow" data-sym="' + sym + '" style="--bar:' + col + '"><div class="mxrbar"></div>' +
-      '<div class="mxrmid"><span class="mxrsym">' + (pinned ? "📌 " : "") + base + '</span><span class="mxrtime">' + tstr + '</span></div>' +
-      '<div class="mxrright"><span class="mxrchg ' + (rise >= 0 ? "up" : "down") + '">' + (rise >= 0 ? "+" : "") + (rise || 0).toFixed(2) + '%</span>' +
-      '<span class="mxrgap ' + gapClass(b) + '">Δ' + (gap || 0).toFixed(gap >= 10 ? 0 : 1) + '%</span></div>' +
-      (pinned ? '<span class="mxrpin" data-unpin="' + sym + '" title="открепить">✕</span>' : '') + '</div>';
+  function exTag(id) { return '<span class="mxpe" style="--exc:' + (COL[id] || "#8a929c") + '">' + (LBL[id] || (id || "?").toUpperCase()) + '</span>'; }
+  function feedRow(a, pinned) {
+    const sym = a.sym, base = sym.replace("_USDT", ""), gap = a.gap || 0, pump = a.pump || 0;
+    const col = COL[a.hiEx || a.loEx || "mexc"] || "#8a929c";
+    const pair = (a.loEx && a.hiEx) ? '<span class="mxpair">' + exTag(a.loEx) + '→' + exTag(a.hiEx) + '</span>' : "";
+    const pumpTag = (Math.abs(pump) >= ACTIVITY_MIN) ? '<span class="mxpump ' + (pump >= 0 ? "up" : "dn") + '">' + (pump >= 0 ? "🚀+" : "🔻") + pump.toFixed(1) + '%</span>' : "";
+    const sub = pinned ? '<span class="mxrtime">📌 закреплено</span>' : (pair + pumpTag + '<span class="mxrtime">' + (a.t ? hhmmss(a.t) : "") + '</span>');
+    const fresh = (!pinned && a.t && (Date.now() - a.t) < 12000) ? " fresh" : "";   // свежий сигнал (<12с) — подсвечиваем и пульсируем
+    return '<div class="mxrow' + fresh + '" data-sym="' + sym + '" style="--bar:' + col + '"><div class="mxrbar"></div>' + (fresh ? '<span class="mxrnew">🔔</span>' : '') +
+      '<div class="mxrmid"><span class="mxrsym">' + base + '</span><span class="mxrsub">' + sub + '</span></div>' +
+      '<div class="mxrright"><span class="mxrgap">' + gap.toFixed(gap >= 10 ? 0 : 1) + '%</span>' +
+      (pinned ? '<span class="mxrpin" data-unpin="' + sym + '" title="открепить">✕</span>' : '') + '</div></div>';
   }
   function renderFeed(bySym) {
     const feed = g("mxfeed"); if (!feed) return; let html = "";
-    for (const sym of CFG.pinned) { const d = PINDATA[sym] || {}; const r = bySym[sym]; html += feedRow(sym, d.gap || 0, d.rise || 0, "закреплено", true, r && r.ex); }
-    const list = Object.keys(ACTIVE).filter((s) => CFG.pinned.indexOf(s) < 0).map((s) => ACTIVE[s]).sort((a, b) => b.gap - a.gap);
-    for (const a of list) html += feedRow(a.sym, a.gap, a.rise, hhmmss(a.t), false, a.ex);
-    if (!html) { feed.innerHTML = '<div class="mxfhint">Пока нет монет со спредом ≥ ' + CFG.thresh + '%. Появятся здесь, когда цена между биржами разъедется (порог настраивается внизу).</div>'; return; }
+    for (const sym of CFG.pinned) { const d = PINDATA[sym] || {}; const r = bySym[sym] || {}; html += feedRow({ sym: sym, gap: d.gap || 0, loEx: r.loEx, hiEx: r.hiEx }, true); }
+    for (const ev of FEEDLOG) { if (CFG.pinned.indexOf(ev.sym) >= 0) continue;
+      if (isSpot(ev.loEx) || isSpot(ev.hiEx)) continue;                        // старые СПОТ-записи скрываем
+      if (Math.abs(ev.pump || 0) < ACTIVITY_MIN) continue;                     // старые «застывшие» записи (без пампа) не показываем — только реальные памп+спред
+      html += feedRow(ev, false); }                                           // ИСТОРИЯ (копится)
+    if (!html) { feed.innerHTML = '<div class="mxfhint">Пока тихо. Сигнал появится, когда монета РАЗЪЕДЕТСЯ ≥ ' + CFG.thresh + '% между биржами/DEX И одновременно даст памп/дамп ≥ ' + CFG.thresh + '% за ~90с.</div>'; return; }
     feed.innerHTML = html;
     feed.querySelectorAll(".mxrpin").forEach((el) => { el.onclick = (e) => { e.stopPropagation(); unpin(el.dataset.unpin); }; });
+    feed.querySelectorAll(".mxwb").forEach((el) => { el.onclick = (e) => { e.stopPropagation(); if (el.dataset.url) window.open(el.dataset.url, "_blank"); }; });   // квадратик биржи = переход на её страницу монеты
     feed.querySelectorAll(".mxrow").forEach((el) => { el.onclick = () => openInCell(el.dataset.sym); });
   }
 
@@ -180,7 +228,7 @@
         cell.innerHTML = '<div class="mxempty">выбери монету<input class="mxcsearch" placeholder="напр. GWEI" autocomplete="off"></div>';
       } else {
         cell.innerHTML = '<div class="mxchead"><span class="mxcsym" title="клик — открыть стакан (Ourbit / WEEX / MEXC)">📖 ' + sym.replace("_USDT", "") + '</span>' +
-          '<span class="mxca hidden">CA</span><span class="mxchg"></span><span class="mxsp"></span><b class="mxcgap" title="спред между биржами"></b>' +
+          '<span class="mxca" title="задать контракт/пару DEX — вставь ссылку Dexscreener или CA (как у друга)">CA</span><span class="mxsp"></span><b class="mxcgap" title="спред между биржами">—</b>' +
           '<button class="mxcedit" title="сменить монету — поиск">✏</button><button class="mxcx" title="убрать ячейку">×</button></div>' +
           '<canvas class="mxccanvas"></canvas><div class="mxcfoot"></div>';
       }
@@ -188,15 +236,37 @@
       const inp = cell.querySelector(".mxcsearch");                 // поле в пустой ячейке — открывает поиск
       if (inp) inp.addEventListener("focus", () => openSearchAt(inp, idx));
       const ed = cell.querySelector(".mxcedit"); if (ed) ed.onclick = () => openSearchAt(ed, idx);   // карандаш = поиск/смена монеты
+      const cabtn = cell.querySelector(".mxca"); if (cabtn) cabtn.onclick = () => setDexMap(sym);      // CA = задать контракт/пару DEX
       const sy = cell.querySelector(".mxcsym"); if (sy) sy.onclick = () => openBookMenu(sym, sy);
       const cx = cell.querySelector(".mxcx"); if (cx) cx.onclick = () => { CFG.cards.splice(idx, 1); save(); renderGrid(); };
-      const cv = cell.querySelector(".mxccanvas"); if (cv) cv.addEventListener("wheel", (e) => { e.preventDefault();
-        const cur = CFG.windowSec; CFG.windowSec = Math.max(15, Math.min(3600, Math.round(cur * (e.deltaY < 0 ? 0.8 : 1.25)))); save(); renderZoom(); }, { passive: false });
+      const cv = cell.querySelector(".mxccanvas");
+      if (cv) {
+        cv.addEventListener("wheel", (e) => { e.preventDefault();          // колесо крутит ТОЛЬКО эту ячейку (её окно), не все графики
+          const cur = winOf(sym); CELLWIN[sym] = Math.max(15, Math.min(14400, Math.round(cur * (e.deltaY < 0 ? 0.8 : 1.25)))); }, { passive: false });
+        // ЛИНЕЙКА: Shift+тяни ИЛИ средняя кнопка мыши (колёсико) — измерить спред между двумя ценами
+        const rel = (e) => { const rc = cv.getBoundingClientRect(); return { x: e.clientX - rc.left, y: e.clientY - rc.top }; };
+        cv.addEventListener("mousedown", (e) => { if (!(e.shiftKey || e.button === 1)) return; e.preventDefault();
+          const p = rel(e); cell._ruler = { x0: p.x, y0: p.y, x1: p.x, y1: p.y }; cell._rul = true; });
+        cv.addEventListener("mousemove", (e) => { const p = rel(e); cell._cross = p; if (cell._rul) { cell._ruler.x1 = p.x; cell._ruler.y1 = p.y; } });   // перекрестие следует за мышью
+        const endRul = () => { cell._rul = false; cell._ruler = null; };                     // отпустила — линейка пропала
+        cv.addEventListener("mouseup", endRul);
+        cv.addEventListener("mouseleave", () => { cell._cross = null; if (cell._rul) endRul(); });   // ушла — перекрестие пропало
+      }
     });
   }
   function setCardCoin(idx, raw) { const sym = normSym(raw); if (!sym) return;
     if (idx >= CFG.cards.length) CFG.cards.push(sym); else CFG.cards[idx] = sym;
     save(); renderGrid(); poll(); }
+  function setDexMap(sym) {                                        // задать контракт/пару DEX вручную (как THIEF)
+    const base = sym.replace("_USDT", "");
+    const inp = prompt("DEX для " + base + ":\nвставь ссылку Dexscreener (…/chain/pair) или адрес контракта (CA)", "");
+    if (inp == null) return; const s = inp.trim(); if (!s) return;
+    let chain = "", pair = "", ca = "";
+    const mm = s.match(/(?:dexscreener\.com|dextools\.io\/app\/[a-z-]+)\/([a-z0-9-]+)\/(?:pair-explorer\/)?([A-Za-z0-9]+)/i);
+    if (mm) { chain = mm[1].toLowerCase(); pair = mm[2]; } else { ca = s.replace(/[^A-Za-z0-9]/g, ""); }
+    const q = "base=" + encodeURIComponent(base) + (pair ? ("&chain=" + encodeURIComponent(chain) + "&pair=" + encodeURIComponent(pair)) : ("&ca=" + encodeURIComponent(ca)));
+    fetch("/api/dexmap?" + q).then((x) => x.json()).then(() => { if (!has("dex")) { CFG.ex.push("dex"); save(); renderBar(); } delete BUF[sym + "::dex"]; poll(); }).catch(() => {});
+  }
   function openInCell(raw) { const sym = normSym(raw); if (!sym) return;
     if (CFG.cards.indexOf(sym) >= 0) return;            // уже открыта — не дублируем
     let idx = CFG.cards.indexOf("");                    // есть пустая ячейка? заполнить её
@@ -218,65 +288,185 @@
   function bookOut(e) { if (BOOKMENU && !BOOKMENU.contains(e.target)) closeBookMenu(); }
   function openBookMenu(sym, anchor) {
     closeBookMenu(); const m = document.createElement("div"); m.className = "mxbookmenu";
+    const base = sym.replace("_USDT", "");
+    try { navigator.clipboard.writeText(base); } catch (e) {}              // КЛИК ПО МОНЕТЕ = сразу копируем тикер (без отдельного пункта)
     const exs = [["ourbit", "🐸 Ourbit"], ["weex", "🟠 WEEX"], ["mexc", "🔵 MEXC"]];
-    m.innerHTML = '<div class="mxbmh">' + sym.replace("_USDT", "") + ' — открыть стакан</div>' + exs.map((e) => '<button data-ex="' + e[0] + '">' + e[1] + '</button>').join("");
+    m.innerHTML = '<div class="mxbmh">' + base + ' ✅ скопирован — открыть стакан</div>' +
+      exs.map((e) => '<button data-ex="' + e[0] + '">' + e[1] + '</button>').join("");
     document.body.appendChild(m); const r = anchor.getBoundingClientRect();
     m.style.left = Math.min(innerWidth - 170, Math.max(6, r.left)) + "px"; m.style.top = (r.bottom + 4) + "px";
     m.querySelectorAll("button").forEach((b) => { b.onclick = () => { openBook(sym, b.dataset.ex); closeBookMenu(); }; });
     BOOKMENU = m; setTimeout(() => document.addEventListener("mousedown", bookOut, true), 0);
   }
 
+  // ── на каких биржах монета есть: подгрузка + компактные квадратики (цвет биржи, F=фьюч/S=спот, клик = страница монеты) ──
+  async function loadWhere(syms) {
+    const missing = []; for (const s of syms) if (s && !WHERE[s] && missing.indexOf(s) < 0) missing.push(s);
+    if (!missing.length) return;
+    try { const r = await fetch("/api/mxwhere?symbols=" + encodeURIComponent(missing.slice(0, 60).join(","))).then((x) => x.json());
+      if (r && r.ok) for (const sym in (r.where || {})) { const rows = r.where[sym]; if (rows && rows.length) WHERE[sym] = rows; }
+    } catch (e) {}
+  }
+  function whereBadges(sym, max) {
+    const rows = WHERE[sym]; if (!rows || !rows.length) return "";
+    const m = {}; for (const r of rows) m[r[0]] = r[1];
+    let h = "", n = 0;
+    for (const ex of WORDER) { if (!(ex in m)) continue; if (n >= max) break; n++;
+      h += '<span class="mxwb" data-url="' + (m[ex] || "") + '" title="' + (LBL[ex] || ex) + ' — открыть страницу монеты" style="--exc:' + (COL[ex] || "#8a929c") + '">' + (ex.endsWith("spot") ? "S" : "F") + '</span>';
+    }
+    return h ? '<span class="mxwrow">' + h + '</span>' : "";
+  }
+
   function pin(raw) { const sym = normSym(raw); if (!sym) return; if (CFG.pinned.indexOf(sym) < 0) CFG.pinned.push(sym); save(); poll(); }
   function unpin(sym) { const i = CFG.pinned.indexOf(sym); if (i >= 0) CFG.pinned.splice(i, 1); delete PINDATA[sym]; save(); renderFeed({}); }
 
   // ── буфер живых цен ──
-  const feedsActive = () => CFG.ex;
   function latestOf(rec, id) { if (rec.m && rec.m[id] && rec.m[id].last) return rec.m[id].last; if (rec.s && rec.s[id] && rec.s[id].length) return rec.s[id][rec.s[id].length - 1][1]; return null; }
   function ingest(sym, rec) {
     const now = nowS();
-    for (const id of feedsActive()) {
+    const ids = CFG.ex.slice();                                          // тумблеры + пары-биржи монеты (чтобы линии спот-бирж тоже писались в буфер)
+    const cf = CELLFEEDS[sym]; if (cf) for (const e of cf) if (ids.indexOf(e) < 0) ids.push(e);
+    for (const id of ids) {
       const key = sym + "::" + id; let buf = BUF[key] || (BUF[key] = []);
-      if (buf.length === 0 && rec.s && rec.s[id]) for (const p of rec.s[id]) buf.push([p[0], p[1]]);   // разовый бэкафилл истории
+      if (rec.s && rec.s[id] && rec.s[id].length) {                       // доливаем историю сервера по мере прогрева фида (не только при пустом буфере)
+        const srv = rec.s[id];
+        if (buf.length === 0) { for (const p of srv) buf.push([p[0], p[1]]); }
+        else { const firstT = buf[0][0], older = srv.filter((p) => p[0] < firstT - 0.5);
+          for (let i = older.length - 1; i >= 0; i--) buf.unshift([older[i][0], older[i][1]]); }
+      }
       const v = latestOf(rec, id);
-      if (v) { const lp = buf[buf.length - 1]; if (!lp || now - lp[0] >= 0.8) buf.push([now, v]); else lp[1] = v; }
-      const cutoff = now - 2000; while (buf.length && buf[0][0] < cutoff) buf.shift();
-      if (buf.length > 3000) buf.splice(0, buf.length - 3000);
+      if (v) { const lp = buf[buf.length - 1]; if (!lp || now - lp[0] >= 0.8) buf.push([now, v]); else lp[1] = v; }   // КАЖДУЮ секунду — точка (каждое движение)
+      const cutoff = now - Math.max(2400, winOf(sym) + 600);              // держим на всё окно ячейки (до 24ч)
+      while (buf.length && buf[0][0] < cutoff) buf.shift();
+      if (buf.length > 30000) buf.splice(0, buf.length - 30000);          // хватит на ~8ч посекундно
     }
   }
+  function seedBuf(key, pts) {                                            // префикс истории свечами в буфер линии (только точки старше имеющихся)
+    const buf = BUF[key] || (BUF[key] = []); const now = nowS();
+    const firstLive = buf.length ? buf[0][0] : now;
+    const hist = pts.filter((p) => p[0] < firstLive - 1 && p[1] > 0);
+    if (hist.length) { for (let i = hist.length - 1; i >= 0; i--) buf.unshift([hist[i][0], hist[i][1]]); if (buf.length > 14000) buf.splice(0, buf.length - 14000); }
+  }
+  // подгрузка истории MEXC + СПРАВЕДЛИВОЙ свечами (детально, до 24ч) — «каждое движение чётко»
+  async function klineSeed(syms) {
+    const minutes = Math.min(1440, Math.max(60, Math.ceil(maxWin() / 60) + 10));   // разрешение по окну: 4ч→Min1×250, 24ч→Min1×1440
+    try { const r = await fetch("/api/mxkline?minutes=" + minutes + "&symbols=" + encodeURIComponent(syms.join(","))).then((x) => x.json());
+      if (!r || !r.ok) return;
+      for (const sym in (r.kline || {})) { const pts = r.kline[sym]; if (!pts || !pts.length) continue;
+        seedBuf(sym + "::mexc", pts);
+        seedBuf(sym + "::mexcfair", pts);                                 // справедливая ≈ цена MEXC → та же история (тоже на 24ч)
+      }
+    } catch (e) {}
+  }
+  // подгрузка ПОЛНОЙ истории DEX свечами (GeckoTerminal) — префикс к живому буферу линии DEX (как у MEXC)
+  async function dexKlineSeed(syms) {
+    if (!has("dex")) return;
+    const minutes = Math.min(1440, Math.max(60, Math.ceil(maxWin() / 60) + 10));   // история DEX по окну (детально)
+    try { const r = await fetch("/api/dexkline?minutes=" + minutes + "&symbols=" + encodeURIComponent(syms.join(","))).then((x) => x.json());
+      if (!r || !r.ok) return;
+      for (const sym in (r.kline || {})) { const pts = r.kline[sym]; if (!pts || !pts.length) continue;
+        seedBuf(sym + "::dex", pts);
+      }
+    } catch (e) {}
+  }
+  // ПОСВОПОВАЯ линия DEX: каждая сделка в пуле = точка (GeckoTerminal /trades). Детально, как у друга. Владеет недавним окном DEX.
+  async function dexTradesSeed(syms) {
+    if (!has("dex")) return;
+    try { const r = await fetch("/api/dextrades?symbols=" + encodeURIComponent(syms.join(","))).then((x) => x.json());
+      if (!r || !r.ok) return;
+      for (const sym in (r.trades || {})) { const pts = r.trades[sym]; if (pts && pts.length) pxSeed(sym + "::dex", pts); }
+    } catch (e) {}
+  }
+  // плотная посекундная история: заменяет её окном [t0..t1] буфера (per-second ПОБЕЖДАЕТ грубые свечи в этом диапазоне),
+  // сохраняя грубую историю СТАРШЕ t0 (fallback за пределами рекордера) и живой хвост НОВЕЕ t1
+  function pxSeed(key, pts) {
+    if (!pts || !pts.length) return;
+    const buf = BUF[key] || (BUF[key] = []);
+    const t0 = pts[0][0], t1 = pts[pts.length - 1][0];
+    const older = buf.filter((p) => p[0] < t0 - 0.5);                    // грубые свечи старше рекордера — оставляем как есть
+    const newer = buf.filter((p) => p[0] > t1 + 0.5);                    // живые точки новее последней записанной секунды
+    const dense = []; for (const p of pts) if (p[1] > 0) dense.push([p[0], p[1]]);
+    const merged = older.concat(dense, newer);                          // порядок по времени сохранён (older<t0<=dense<=t1<newer)
+    BUF[key] = merged;
+    if (merged.length > 30000) merged.splice(0, merged.length - 30000);
+  }
+  // подгрузка ПЛОТНОЙ посекундной истории (серверный рекордер) — каждое движение MEXC/DEX/fair за окно, сразу при открытии
+  async function pxHistSeed(syms) {
+    const sec = Math.min(21600, Math.max(60, Math.ceil(maxWin()) + 30));            // окно ячейки в секундах, потолок 6ч (maxlen рекордера)
+    try { const r = await fetch("/api/pxhist?sec=" + sec + "&symbols=" + encodeURIComponent(syms.join(","))).then((x) => x.json());
+      if (!r || !r.ok) return;
+      for (const sym in (r.hist || {})) { const h = r.hist[sym] || {};
+        for (const feed in h) {
+          if (feed === "dex") continue;                                    // DEX историю ведёт dexTradesSeed (посвоповая, детальнее)
+          const key = feed === "fair" ? "mexcfair" : feed;                 // осн. биржи + mexc + справедливая — все посекундно
+          pxSeed(sym + "::" + key, h[feed]);
+        }
+      }
+    } catch (e) {}
+  }
   function spreadNow(sym) { const px = []; let rise = 0, hiT = -1;
-    const m = META[sym] || {}; for (const ex in m) { if (ex === "mexcfair") continue; const v = m[ex]; if (v && v.last) { px.push(v.last); if (v.turn > hiT) { hiT = v.turn; rise = v.rise; } } }   // DEX учитываем (MEXC↔DEX), справедливую — нет
-    if (px.length < 2) return { gap: 0, rise }; const mn = Math.min(...px), mx = Math.max(...px); return { gap: (mx - mn) / mn * 100, rise }; }
+    const m = META[sym] || {}; for (const ex in m) { if (ex.endsWith("fair")) continue; const v = m[ex]; if (v && v.last) { px.push(v.last); if (v.turn > hiT) { hiT = v.turn; rise = v.rise; } } }   // DEX учитываем (MEXC↔DEX), справедливые — нет
+    if (px.length < 2) return { gap: 0, rise };
+    const med = px.slice().sort((a, b) => a - b)[Math.floor(px.length / 2)];   // отсечь коллизии (>50% от медианы)
+    const cl = px.filter((p) => med <= 0 || Math.abs(p - med) / med <= 0.5); const use = cl.length >= 2 ? cl : px;
+    const mn = Math.min(...use), mx = Math.max(...use); return { gap: mn > 0 ? (mx - mn) / mn * 100 : 0, rise }; }
 
   // ── опрос ──
   let _pc = 0;
   async function poll() {
     if (!win() || win().classList.contains("hidden")) return;
     _pc++;
-    const feeds = CFG.ex.filter((e) => e !== "mexcfair" && e !== "dex");
+    // СКАНЕР СПРЕД-КОЛЛОВ: только ФЬЮЧ-биржи бара + DEX (сервер добавляет сам). СПОТ в уведомления НЕ берём (просьба Вики).
+    // Тумблеры бара отвечают ТОЛЬКО за линии на графике.
+    const feeds = SRC.reduce((a, sr) => { if (sr.f) a.push(sr.f); return a; }, []);
+    const serFeeds = CFG.ex.filter((e) => e !== "mexcfair" && e !== "dex");   // серии графика: биржи + <ex>fair (сервер понимает суффикс)
     let bySym = {};
-    if (feeds.length >= 2) {
+    {
       try { const gr = await fetch("/api/gaptop?n=80&minturn=" + CFG.minturn + "&maxgap=" + CFG.maxgap + "&ex=" + encodeURIComponent(feeds.join(","))).then((x) => x.json());
-        if (gr && gr.ok) { for (const r of (gr.rows || [])) bySym[r.symbol] = r; processRows(gr.rows || []);
+        if (gr && gr.ok) { for (const r of (gr.rows || [])) { bySym[r.symbol] = r;
+            if (r.loEx || r.hiEx) CELLFEEDS[r.symbol] = [r.loEx, r.hiEx].filter((e) => e && e !== "dex"); }   // где реальный спред → линии в ячейке
+          processRows(gr.rows || []);
           const st = g("mxstat2"); if (st) st.textContent = (gr.rows || []).length + " монет · " + Object.keys(ACTIVE).length + " в спреде · порог " + CFG.thresh + "%"; } } catch (e) {}
     }
     const need = []; for (const s of CFG.cards) if (s && need.indexOf(s) < 0) need.push(s); for (const s of CFG.pinned) if (need.indexOf(s) < 0) need.push(s);
+    for (const s of need) if (!CELLFEEDS[s]) { const ev = FEEDLOG.find((e) => e.sym === s); if (ev && (ev.loEx || ev.hiEx)) CELLFEEDS[s] = [ev.loEx, ev.hiEx].filter((e) => e && e !== "dex"); }
     if (need.length) {
-      const url = "/api/gridseries?symbols=" + encodeURIComponent(need.join(",")) + "&ex=" + encodeURIComponent(feeds.join(",")) + "&fair=" + (has("mexcfair") ? "1" : "0") + "&dex=" + (has("dex") ? "1" : "0");
+      const reqSet = {}; for (const e of serFeeds) reqSet[e] = 1;              // тумблеры + пары-биржи всех открытых монет → тянем их серии
+      for (const s of need) { const cf = CELLFEEDS[s]; if (cf) for (const e of cf) reqSet[e] = 1; }
+      const reqFeeds = Object.keys(reqSet);
+      const url = "/api/gridseries?symbols=" + encodeURIComponent(need.join(",")) + "&ex=" + encodeURIComponent(reqFeeds.join(",")) + "&fair=" + (has("mexcfair") ? "1" : "0") + "&dex=" + (has("dex") ? "1" : "0");
       try { const r = await fetch(url).then((x) => x.json());
         if (r && r.ok) { const ser = r.series || {};
           for (const sym in ser) { META[sym] = ser[sym].m || {}; ingest(sym, ser[sym]); }
           for (const sym of CFG.pinned) PINDATA[sym] = spreadNow(sym); } } catch (e) {}
+      if (_pc % 5 === 1) {                               // L (глубина MEXC) — раз в ~5с, чтобы не долбить стакан
+        try { const lr = await fetch("/api/mxliq?symbols=" + encodeURIComponent(need.join(",")) + "&pct=0.5").then((x) => x.json());
+          if (lr && lr.ok) Object.assign(LIQ, lr.liq || {}); } catch (e) {}
+      }
+      // МГНОВЕННЫЙ сид: новая монета или окно расширили → тянем ВСЮ историю СРАЗУ (не ждать циклов) — быстрый прогруз 1в1
+      const deep = need.filter((s) => !(SEEDED[s] >= winOf(s)));
+      if (deep.length) { for (const s of deep) SEEDED[s] = winOf(s); pxHistSeed(deep); klineSeed(deep); dexKlineSeed(deep); dexTradesSeed(deep); }
+      if (_pc % 3 === 0) { pxHistSeed(need); }                         // ПЛОТНАЯ посекундная история MEXC/fair (свежая, часто)
+      if (_pc % 2 === 0) { dexTradesSeed(need); }                      // ПОСВОПОВАЯ линия DEX — часто, каждое движение пула
+      if (_pc % 8 === 2) { klineSeed(need); dexKlineSeed(need); }      // грубые свечи — только как fallback СТАРШЕ рекордера/сделок
     }
+    // на каких биржах есть монета — для бейджей (ячейки + лента + закреп), кэшируется
+    const wsy = need.slice(); for (const ev of FEEDLOG.slice(0, 30)) if (wsy.indexOf(ev.sym) < 0) wsy.push(ev.sym);
+    loadWhere(wsy);
     renderFeed(bySym);
   }
 
   // ── живой рендер (плавно, каждый кадр) ──
+  let _lastFrame = 0;
   function frame() { raf = requestAnimationFrame(frame);
     const w = win(); if (!w || w.classList.contains("hidden")) return;
+    const t = Date.now(); if (t - _lastFrame < 55) return;             // ~18 fps: линии обновляются ~1с, 60fps не нужен → убирает лаги
+    _lastFrame = t;
     const grid = g("mxgrid"); if (!grid) return;
     try { for (const cell of grid.children) { const idx = +cell.dataset.idx, sym = CFG.cards[idx]; if (sym) drawCell(cell, sym); } }
     catch (e) { const s = g("mxstat"); if (s) { s.textContent = "РИС.ОШИБКА: " + (e && e.message || e); s.style.color = "#ef5f5a"; } }
   }
+  function idxAtOrAfter(b, t) { let lo = 0, hi = b.length; while (lo < hi) { const m = (lo + hi) >> 1; if (b[m][0] < t) lo = m + 1; else hi = m; } return lo; }   // первый индекс с t≥порога (буфер отсортирован)
 
   function drawCell(cell, sym) {
     const cv = cell.querySelector(".mxccanvas"); if (!cv) return;
@@ -284,14 +474,36 @@
     W = Math.max(60, W); H = Math.max(40, H);
     if (cv.width !== W || cv.height !== H) { cv.width = W; cv.height = H; }
     const x = cv.getContext("2d"); x.clearRect(0, 0, W, H);
-    const padR = 58, padL = 2, now = nowS(), tMin = now - CFG.windowSec, tMax = now;
-    const lines = CFG.ex.filter((id) => { const b = BUF[sym + "::" + id]; return b && b.length; });
-    if (!lines.length) { x.fillStyle = "#5b6573"; x.font = "11px monospace"; x.fillText("сбор данных…", 10, 20); return; }
+    const padR = 58, padL = 2, now = nowS(), cw = winOf(sym), tMin = now - cw, tMax = now;
+    // ТУМБЛЕРЫ — ГЛАВНЫЕ: рисуем только включённые биржи. Пара-спред монеты — ТОЛЬКО фолбэк (если монеты нет ни на одной включённой).
+    const allLines = CFG.ex.filter((id) => { const b = BUF[sym + "::" + id]; return b && b.length; });
+    if (!allLines.length) { const cf = CELLFEEDS[sym]; if (cf) for (const e of cf) { const b = BUF[sym + "::" + e]; if (b && b.length && allLines.indexOf(e) < 0) allLines.push(e); } }
+    if (!allLines.length) { x.fillStyle = "#5b6573"; x.font = "11px monospace"; x.fillText("сбор данных…", 10, 20); return; }
+    // отсечь только ДИКИЕ коллизии (>5×), при ≤2 линиях не фильтруем; справедливую (пунктир) не трогаем
+    const lastsA = allLines.map((id) => { const b = BUF[sym + "::" + id]; return [id, b[b.length - 1][1]]; }).filter((z) => z[1] > 0);
+    const med = lastsA.length ? lastsA.map((z) => z[1]).sort((a, b) => a - b)[Math.floor(lastsA.length / 2)] : 0;
+    let lines = allLines;
+    if (allLines.length > 2 && med > 0) {
+      const kept = allLines.filter((id) => { const v = BUF[sym + "::" + id], p = v[v.length - 1][1]; return p > 0 && p / med <= 5 && med / p <= 5; });
+      if (kept.length >= 2) lines = kept;
+    }
+    for (const f of allLines) if (f.endsWith("fair") && lines.indexOf(f) < 0) lines.push(f);   // справедливые не режем фильтром коллизий
+    // убрать ЗАСТЫВШИЕ фиды-выбросы: линия не менялась во всём окне И далеко (>3%) от кластера = битый/протухший фид (тикер-коллизия), а не движение
+    if (med > 0) lines = lines.filter((id) => {
+      if (id === "dex" || id.endsWith("fair")) return true;                    // dex/справедливые не трогаем (своя природа/лаг)
+      const b = BUF[sym + "::" + id], last = b[b.length - 1][1];
+      if (!(last > 0) || Math.abs(last - med) / med <= 0.03) return true;       // близко к кластеру → оставляем
+      const cut = now - Math.min(cw, 180);
+      for (let i = b.length - 1; i >= 0; i--) { if (b[i][0] < cut) break; if (b[i][1] !== last) return true; }   // менялась (реальное движение/арбитраж) → оставляем
+      return false;                                                            // застыла И далеко → выброс, не рисуем
+    });
+    if (!lines.length) lines = allLines;                                       // подстраховка: не гасим всё
     let hi = -Infinity, lo = Infinity;
     for (const id of lines) { const b = BUF[sym + "::" + id]; for (let i = b.length - 1; i >= 0; i--) { if (b[i][0] < tMin) break; if (b[i][1] > hi) hi = b[i][1]; if (b[i][1] < lo) lo = b[i][1]; } }
     if (!(hi > lo)) { const m = hi > 0 ? hi : 1; hi = m * 1.001; lo = m * 0.999; }
     const pad = (hi - lo) * 0.12; hi += pad; lo -= pad; const rng = hi - lo || 1, dec = decOf((hi + lo) / 2);
     const yOf = (p) => H - (p - lo) / rng * (H - 6) - 3;
+    const priceAt = (y) => lo + (H - 3 - y) / (H - 6) * rng; cell._priceAt = priceAt;   // для линейки (Y→цена)
     const xOf = (t) => padL + Math.max(0, Math.min(1, (t - tMin) / (tMax - tMin))) * (W - padR - padL);
     // сетка + оси: слева цена, справа % (спред от низа)
     x.strokeStyle = "rgba(255,255,255,.05)"; x.lineWidth = 1; x.font = "9px ui-monospace,monospace"; x.textAlign = "left";
@@ -299,21 +511,23 @@
       x.strokeStyle = "rgba(255,255,255,.05)"; x.beginPath(); x.moveTo(padL, yy); x.lineTo(W - padR, yy); x.stroke();
       x.fillStyle = "#3a4250"; x.fillText(p.toFixed(dec), padL + 2, yy - 2);
       x.fillStyle = "#5b6573"; x.fillText(((p - lo) / (lo || 1) * 100).toFixed(0) + "%", W - padR + 4, yy + 8); }
-    // линии — тонкие, сглаженные (плавная кривая через середины точек: живо, но без рывков)
+    // линии цены — ступеньками, каждая точка = движение по секундам (как у THIEF друга)
     const pills = [];
-    x.lineJoin = "round"; x.lineCap = "round";
+    x.lineJoin = "round"; x.lineCap = "butt";
     for (const id of lines) { const b = BUF[sym + "::" + id], col = COL[id] || "#8a929c";
-      const pts = []; let lastV = null;
-      for (let i = 0; i < b.length; i++) { const t = b[i][0]; if (t < tMin) { lastV = b[i][1]; continue; } pts.push([xOf(t), yOf(b[i][1])]); }
-      if (lastV != null) pts.unshift([xOf(tMin), yOf(lastV)]);            // якорь у левого края окна
+      const pts = []; const s0 = idxAtOrAfter(b, tMin);                  // пропуск к началу окна (не перебирать всю историю → без лагов)
+      let lastV = s0 > 0 ? b[s0 - 1][1] : null, firstV = null;
+      for (let i = s0; i < b.length; i++) { if (firstV == null) firstV = b[i][1]; pts.push([xOf(b[i][0]), yOf(b[i][1])]); }
+      let anchorV = (lastV != null) ? lastV : firstV;                    // есть реальная точка старше окна → тянем её плоско к левому краю (непрерывно, как THIEF)
+      if (id === "dex" && lastV == null) anchorV = null;                  // DEX без сид-истории: НЕ рисуем фейковую плоскую полку во всю ширину — начинаем с первой реальной точки
+      if (anchorV != null && pts.length) pts.unshift([xOf(tMin), yOf(anchorV)]);
       const lastPt = b[b.length - 1]; if (lastPt) pills.push({ y: yOf(lastPt[1]), v: lastPt[1], col });
       if (!pts.length) continue;
-      x.strokeStyle = col; x.lineWidth = id === "mexcfair" ? Math.max(0.8, CFG.lw * 0.7) : CFG.lw;
-      if (id === "mexcfair") x.setLineDash([4, 3]); else x.setLineDash([]);
+      const isFair = id.endsWith("fair");
+      x.strokeStyle = col; x.lineWidth = isFair ? Math.max(0.8, CFG.lw * 0.7) : CFG.lw;
+      if (isFair) x.setLineDash([4, 3]); else x.setLineDash([]);           // ЛЮБАЯ справедливая — пунктир цвета своей биржи
       x.beginPath(); x.moveTo(pts[0][0], pts[0][1]);
-      if (pts.length < 3) { for (let i = 1; i < pts.length; i++) x.lineTo(pts[i][0], pts[i][1]); }
-      else { for (let i = 1; i < pts.length - 1; i++) { const mx = (pts[i][0] + pts[i + 1][0]) / 2, my = (pts[i][1] + pts[i + 1][1]) / 2; x.quadraticCurveTo(pts[i][0], pts[i][1], mx, my); }
-        x.lineTo(pts[pts.length - 1][0], pts[pts.length - 1][1]); }
+      for (let i = 1; i < pts.length; i++) { x.lineTo(pts[i][0], pts[i - 1][1]); x.lineTo(pts[i][0], pts[i][1]); }   // СТУПЕНЬКА: цена держится и прыгает на новом тике (как у THIEF друга)
       x.stroke(); }
     x.setLineDash([]);
     pills.sort((a, b) => a.y - b.y); const ph = 13; for (let i = 1; i < pills.length; i++) if (pills[i].y - pills[i - 1].y < ph) pills[i].y = pills[i - 1].y + ph;
@@ -321,19 +535,48 @@
     for (const pl of pills) { const yy = Math.max(7, Math.min(H - 5, pl.y)); x.fillStyle = pl.col; roundRect(x, W - padR + 1, yy - 6, padR - 3, 12, 3); x.fill(); x.fillStyle = "#0b0e12"; x.fillText(pl.v.toFixed(dec), W - padR + 4, yy + 3); }
     // header + footer
     const m = META[sym] || {}, sp = spreadNow(sym);
-    const prim = lines.find((e) => e !== "mexcfair") || lines[0], b0 = BUF[sym + "::" + prim];
-    const chgEl = cell.querySelector(".mxchg"); if (chgEl && b0 && b0.length > 1) { let base = null; for (const p of b0) if (p[0] >= tMin) { base = p[1]; break; } if (base == null) base = b0[0][1]; const c = (b0[b0.length - 1][1] - base) / base * 100; chgEl.textContent = (c >= 0 ? "+" : "") + c.toFixed(2) + "%"; chgEl.className = "mxchg " + (c >= 0 ? "up" : "down"); }
-    const gapEl = cell.querySelector(".mxcgap"); if (gapEl) { gapEl.textContent = "Δ" + sp.gap.toFixed(2) + "%"; gapEl.className = "mxcgap" + (sp.gap >= CFG.thresh ? " hot" : ""); }
-    const ca = cell.querySelector(".mxca"); if (ca) ca.classList.toggle("hidden", !(m.dex));
+    const prim = lines.find((e) => !e.endsWith("fair")) || lines[0];
+    const gapEl = cell.querySelector(".mxcgap"); if (gapEl) gapEl.textContent = sp.gap.toFixed(2) + "%";   // спред — жёлтой цифрой (наша палитра)
+    const ca = cell.querySelector(".mxca"); if (ca) ca.classList.toggle("on", !!(m.dex));
     // подвал (THIEF): слева — на каких биржах есть монета; справа — D (актив/мин) · L (ликвидн.) · окно
     const foot = cell.querySelector(".mxcfoot"); if (foot) {
       let turn = 0; for (const id of lines) if (m[id] && m[id].turn) turn = Math.max(turn, m[id].turn);
-      const badges = lines.filter((id) => id !== "mexcfair" && id !== "dex").map((id) => '<span class="mxbadge" style="--exc:' + (COL[id] || "#8a929c") + '">' + (LBL[id] || id) + '</span>').join("");
-      const winLbl = (WINS.find((w) => w[0] === CFG.windowSec) || [0, CFG.windowSec + "с"])[1];
+      const wb = whereBadges(sym, 12);                                     // на каких биржах монета есть (клик = страница монеты)
+      const badges = wb || lines.filter((id) => !id.endsWith("fair") && id !== "dex").map((id) => '<span class="mxbadge" style="--exc:' + (COL[id] || "#8a929c") + '">' + (LBL[id] || id) + '</span>').join("");
+      const winLbl = (WINS.find((w) => w[0] === cw) || [0, cw + "с"])[1];   // окно ЭТОЙ ячейки
       foot.innerHTML = badges + '<span class="mxsp"></span>' +
         '<span class="mxfd" title="изменений цены в минуту (активность)">D:' + activity(sym, prim) + '</span>' +
-        '<span class="mxfl" title="ликвидность — 24ч оборот (ориентир по объёму входа)">L:' + fmtUsd(turn) + '</span>' +
+        '<span class="mxfl" title="L: сколько $ можно зайти на MEXC до сдвига цены на 0.5% (глубина стакана)">L:' + fmtUsd(LIQ[sym] != null ? LIQ[sym] : turn) + '</span>' +
         '<span class="mxftf" title="окно графика (колесо мыши / кнопки внизу)">' + winLbl + '</span>';
+    }
+    // ── ЛИНЕЙКА: измерение спреда между двумя ценами (Shift-тяни или средняя кнопка) ──
+    const r = cell._ruler;
+    if (r && priceAt) {
+      const y0 = Math.max(3, Math.min(H - 3, r.y0)), y1 = Math.max(3, Math.min(H - 3, r.y1));
+      const p0 = priceAt(y0), p1 = priceAt(y1), loP = Math.min(p0, p1), hiP = Math.max(p0, p1);
+      const spr = loP > 0 ? (hiP - loP) / loP * 100 : 0;
+      const RC = "#5c9c6e", vx = r.x1 || W - padR - 30;                 // приглушённо-зелёная сплошная линейка
+      x.strokeStyle = RC; x.setLineDash([]); x.lineWidth = 1;
+      x.beginPath(); x.moveTo(0, y0); x.lineTo(W - padR, y0); x.moveTo(0, y1); x.lineTo(W - padR, y1); x.moveTo(vx, y0); x.lineTo(vx, y1); x.stroke();
+      const my = (y0 + y1) / 2, txt = spr.toFixed(2) + "%";
+      x.font = "700 12px ui-monospace,monospace"; const tw = x.measureText(txt).width;
+      x.fillStyle = RC; roundRect(x, vx - tw - 12, my - 8, tw + 10, 16, 4); x.fill();
+      x.fillStyle = "#0b0e12"; x.textAlign = "left"; x.fillText(txt, vx - tw - 7, my + 4);
+    }
+    // ── ПЕРЕКРЕСТИЕ (едва заметное) + время снизу, цена справа — следует за мышью ──
+    const cx = cell._cross;
+    if (cx && !r) {
+      const gx = Math.max(padL, Math.min(W - padR, cx.x)), gy = Math.max(3, Math.min(H - 3, cx.y));
+      x.strokeStyle = "rgba(255,255,255,.16)"; x.setLineDash([3, 3]); x.lineWidth = 1;
+      x.beginPath(); x.moveTo(gx, 3); x.lineTo(gx, H - 3); x.moveTo(padL, gy); x.lineTo(W - padR, gy); x.stroke(); x.setLineDash([]);
+      const tt = tMin + (gx - padL) / (W - padR - padL || 1) * (tMax - tMin);   // x → время
+      const tl = hhmmss(tt * 1000); x.font = "700 10px ui-monospace,monospace";
+      const tw2 = x.measureText(tl).width; let bx = Math.max(padL, Math.min(W - padR - tw2 - 8, gx - (tw2 + 8) / 2));
+      x.fillStyle = "rgba(20,24,30,.92)"; roundRect(x, bx, H - 15, tw2 + 8, 13, 3); x.fill();
+      x.fillStyle = "#c9cdd4"; x.textAlign = "left"; x.fillText(tl, bx + 4, H - 5);
+      const pv = priceAt(gy);                                                   // y → цена (пилюля справа)
+      x.fillStyle = "rgba(20,24,30,.92)"; roundRect(x, W - padR + 1, gy - 7, padR - 3, 14, 3); x.fill();
+      x.fillStyle = "#e6eaef"; x.fillText(pv.toFixed(dec), W - padR + 4, gy + 3);
     }
   }
   function activity(sym, ex) { const b = BUF[sym + "::" + ex]; if (!b || b.length < 2) return 0;
@@ -341,8 +584,10 @@
   function roundRect(x, X, Y, w, h, r) { x.beginPath(); x.moveTo(X + r, Y); x.arcTo(X + w, Y, X + w, Y + h, r); x.arcTo(X + w, Y + h, X, Y + h, r); x.arcTo(X, Y + h, X, Y, r); x.arcTo(X, Y, X + w, Y, r); x.closePath(); }
 
   // ── список монет + КАСТОМНЫЙ поиск-дропдаун в ячейке ──
-  async function loadSyms() { if (SYMS.length) return;
-    try { const r = await fetch("/api/mxsyms").then((x) => x.json()); if (r && r.ok) SYMS = r.syms || []; } catch (e) {} }
+  let _symsAt = 0;
+  async function loadSyms(force) {                                     // список монет для поиска — освежаем (свежие листинги MEXC появляются)
+    const t = Date.now(); if (!force && SYMS.length && t - _symsAt < 120000) return;
+    try { const r = await fetch("/api/mxsyms").then((x) => x.json()); if (r && r.ok && r.syms) { SYMS = r.syms; _symsAt = t; } } catch (e) {} }
   let SPOP = null, SIDX = -1;
   function ensureSPop() { if (SPOP) return SPOP;
     const p = document.createElement("div"); p.className = "mxsearchpop"; p.style.display = "none";
@@ -361,21 +606,22 @@
     box.innerHTML = list.length ? list.map((s) => '<div class="mxso" data-s="' + s + '">' + s + '</div>').join("") : '<div class="mxso-empty">ничего не найдено</div>';
     box.querySelectorAll(".mxso").forEach((el) => { el.onmousedown = (e) => { e.preventDefault(); setCardCoin(SIDX, el.dataset.s); closeSearch(); }; });
   }
-  function openSearchAt(anchor, idx) { loadSyms(); const p = ensureSPop(); SIDX = idx;
+  function openSearchAt(anchor, idx) { const p = ensureSPop(); SIDX = idx;
     const inp = p.querySelector(".mxsi"); if (inp) inp.value = ""; renderSearch("");
+    loadSyms().then(() => { if (SPOP && SPOP.style.display !== "none") renderSearch(inp ? inp.value : ""); });   // дозагрузили свежий список → перерисовать дропдаун
     const r = anchor.getBoundingClientRect(); p.style.left = Math.min(innerWidth - 236, Math.max(6, r.right - 228)) + "px"; p.style.top = (r.bottom + 4) + "px"; p.style.display = "block";
     if (inp) setTimeout(() => inp.focus(), 0); }
 
   // ── окно ──
   // подготовить контент панели (наполнить сетку/панели) — вызывается и при загрузке, и при открытии
   function ensure() {
-    const stv = g("mxstat"); if (stv) { stv.textContent = "v186"; stv.style.color = "#6b7280"; }
+    const stv = g("mxstat"); if (stv) { stv.textContent = "v232"; stv.style.color = "#6b7280"; }
     try {
       if (!CFG.cards || !CFG.cards.length) { CFG.cards = DEF.cards.slice(); save(); }
       renderBar(); renderZoom(); renderGrid(); loadSyms();
       const sb = g("mxsound"); if (sb) sb.classList.toggle("on", CFG.sound);
       const th = g("mxthresh"); if (th) th.value = CFG.thresh;
-    } catch (e) { if (stv) { stv.textContent = "v186 ОШИБКА: " + (e && e.message || e); stv.style.color = "#ef5f5a"; } }
+    } catch (e) { if (stv) { stv.textContent = "v232 ОШИБКА: " + (e && e.message || e); stv.style.color = "#ef5f5a"; } }
   }
   function open() {
     const w = win(); if (!w) return;
@@ -383,6 +629,7 @@
     w.classList.remove("hidden", "tiled", "collapsed"); if (w.parentElement !== document.body) document.body.appendChild(w); w.style.zIndex = 46;
     const r = w.getBoundingClientRect();
     if (wasTiled || r.width < 200 || r.right < 60 || r.left > innerWidth - 60 || r.top > innerHeight - 40) { w.style.left = "40px"; w.style.right = "auto"; w.style.top = "60px"; w.style.width = "1100px"; w.style.height = "660px"; }
+    else if (r.left < -30 || r.top < 0) { w.style.left = Math.max(6, r.left) + "px"; w.style.top = Math.max(44, r.top) + "px"; if (r.left < -30) w.style.left = "6px"; }   // окно уползло за край экрана (бар/лента «пропали») → вернуть в экран, размер не трогаем
     firstScan = true; ensure(); poll();
     if (timer) clearInterval(timer); timer = setInterval(poll, POLL_MS);
     if (!raf) raf = requestAnimationFrame(frame);
@@ -397,9 +644,12 @@
     const add = g("mxadd"); if (add) add.addEventListener("keydown", (e) => { if (e.key === "Enter") { pin(add.value); add.value = ""; } });
     const addb = g("mxaddb"); if (addb) addb.onclick = () => { const a = g("mxadd"); if (a) { pin(a.value); a.value = ""; } };
     const sb = g("mxsound"); if (sb) sb.onclick = () => { CFG.sound = !CFG.sound; save(); sb.classList.toggle("on", CFG.sound); if (CFG.sound) chime(false); };
-    const th = g("mxthresh"); if (th) th.onchange = () => { const v = parseFloat(th.value); if (v > 0) { CFG.thresh = v; save(); } };
+    const th = g("mxthresh"); if (th) { th.value = CFG.thresh; th.onchange = () => { const v = parseFloat(th.value); if (v > 0) { CFG.thresh = v; save(); } }; }
     const ac = g("mxaddcard"); if (ac) ac.onclick = () => { CFG.cards.push(""); save(); renderGrid(); };
     const gr = g("mxgear"); if (gr) gr.onclick = openSettings;
+    const gridEl = g("mxgrid");                                        // футер ячейки переписывается каждый кадр → клики по квадратикам бирж ловим ДЕЛЕГАТОМ
+    if (gridEl) gridEl.addEventListener("click", (e) => { const wb = e.target && e.target.closest && e.target.closest(".mxwb");
+      if (wb && wb.dataset.url) { e.stopPropagation(); window.open(wb.dataset.url, "_blank"); } });
     const gx = g("mxset-x"); if (gx) gx.onclick = closeSettings;
     // НАДЁЖНЫЙ делегат: клик по крестику настроек ловим на уровне документа (мимо любых локальных перехватчиков)
     document.addEventListener("mousedown", (e) => {

@@ -322,7 +322,11 @@ window.openExPicker=openExPicker;
 // открыть монету на конкретной бирже (из скринера/поиска). WEEX-монету НЕ гоняем через switchSymbol (он дёргает Ourbit-поток).
 function openSymbolOn(sym, ex){
   if(!sym) return; const base=sym.replace("_USDT","");
-  if(ex==="weex"){
+  if(ex==="mexc"){
+    S.symbol=sym; const bt=$("booktitle"); if(bt) bt.textContent=base; const si=$("symbol"); if(si) si.value=base;
+    S.centerS=null; S.depth=null;
+    if(!S.exMexc) setMexcMode(true); else { mexcResetFlow(); mexcPoll(); mexcPollTrades(); }   // уже на MEXC — обновить стакан+ленту под новый символ
+  } else if(ex==="weex"){
     S.symbol=sym; const bt=$("booktitle"); if(bt) bt.textContent=base; const si=$("symbol"); if(si) si.value=base;
     S.centerS=null;
     if(!S.exWeex) setWeexMode(true); else { weexResetFlow(); weexPoll(); weexPollTrades(); }   // уже на WEEX — обновить стакан+ленту под новый символ

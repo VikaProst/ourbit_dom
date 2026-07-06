@@ -48,6 +48,7 @@
     <button id="centerbtn" class="gear" title="Центрировать стакан на цене (горячая клавиша C)">⊙ Центр</button>
     <button id="chartbtn" class="gear" title="график">+ График</button>
     <button id="scrbtn" class="gear" title="Скринер — топ по обороту за 30с">📊 Скринер</button>
+    <button id="clasbtn" class="gear" title="Классика — формации ТС на Binance 5м: пробои уровней, наклонки, ТВХ">📈 Классика</button>
     <button id="mxbtn" class="gear" title="THIEF SQUAD — наложение цен разных бирж на монету, видно отставание/арбитраж">🕵 THIEF SQUAD</button>
     <button id="watchbtn" class="gear" title="Вочлист — избранные монеты">★ Вочлист</button>
     <button id="finbtn" class="gear" title="Финрез — баланс, позиции, ордера">💼 Финрез</button>
@@ -307,6 +308,16 @@
     .mxsf:hover{color:#c9cdd4}
     .mxsf.on{color:#0b0e12;background:var(--exc)}
     .mxsf.dis{opacity:.3;cursor:not-allowed}
+    /* компактная колонка биржи: имя сверху, буквы S F Ф (спот/фьюч/справедливая) под ним */
+    .mxsrc.v{flex-direction:column;align-items:stretch;height:auto}
+    .mxsrc.v .mxsrclbl{justify-content:center;padding:1px 6px}
+    .mxsfrow{display:flex}
+    .mxsfrow .mxsf{flex:1;justify-content:center;padding:1px 4px;border-left:1px solid rgba(255,255,255,.08);border-top:1px solid rgba(255,255,255,.08)}
+    .mxsfrow .mxsf:first-child{border-left:0}
+    /* мини-квадратики «на каких биржах монета есть» (цвет биржи, F/S), клик = страница монеты на бирже */
+    .mxwrow{display:flex;gap:2px;flex-wrap:wrap;margin-top:1px}
+    .mxwb{display:inline-flex;align-items:center;justify-content:center;width:12px;height:12px;border-radius:2px;font:700 8px ui-monospace,monospace;color:#0b0e12;background:var(--exc,#8a929c);cursor:pointer;opacity:.92;flex:0 0 auto}
+    .mxwb:hover{opacity:1;outline:1px solid rgba(255,255,255,.35)}
     #mxsound{font-size:13px} #mxsound.on{color:#e6c84a}
     /* ── сетка карточек (THIEF): 4 ячейки, в каждой график монеты + поиск ── */
     .mxgrid{flex:1;overflow:auto;display:grid;grid-template-columns:repeat(2,1fr);grid-auto-rows:1fr;gap:7px;padding:7px;min-height:0}
@@ -314,7 +325,9 @@
     .mxchead{display:flex;align-items:center;gap:6px;padding:4px 8px;border-bottom:1px solid rgba(255,255,255,.06)}
     .mxcsym{color:#e8ecf2;font:700 13px system-ui,Arial;letter-spacing:.3px;cursor:pointer;white-space:nowrap}
     .mxcsym:hover{color:#7cc4ff}
-    .mxca{font:700 8px ui-monospace,monospace;color:#e259c6;border:1px solid #e259c655;border-radius:3px;padding:0 3px}
+    .mxca{font:700 8px ui-monospace,monospace;color:#7a6a80;border:1px solid #e259c633;border-radius:3px;padding:0 3px;cursor:pointer}
+    .mxca:hover{color:#e259c6;border-color:#e259c6}
+    .mxca.on{color:#e259c6;border-color:#e259c688;background:#e259c618}
     .mxchg{font:700 12px ui-monospace,monospace}
     .mxchg.up,.up{color:#3fbf5f} .mxchg.down,.down{color:#ef5f5a}
     .mxsp{flex:1}
@@ -326,8 +339,14 @@
     .mxcx:hover{color:#ef5f5a}
     .mxccanvas{width:100%;height:100%;min-height:120px;display:block}
     .mxcfoot{display:flex;align-items:center;gap:6px;padding:3px 8px;border-top:1px solid rgba(255,255,255,.06);font:700 9px ui-monospace,monospace;overflow:hidden;white-space:nowrap}
-    .mxbadge{color:var(--exc,#8a929c);letter-spacing:.2px}
+    .mxbadge{color:var(--exc,#8a929c);border:1px solid color-mix(in srgb,var(--exc,#8a929c) 45%,transparent);background:color-mix(in srgb,var(--exc,#8a929c) 12%,transparent);border-radius:3px;padding:1px 5px;letter-spacing:.2px}
     .mxliq{color:#5b6573;margin-left:auto}
+    /* тонкий аккуратный скроллбар везде в панели */
+    .mxfeed,.mxgrid,.mxsolist{scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.16) transparent}
+    .mxfeed::-webkit-scrollbar,.mxgrid::-webkit-scrollbar,.mxsolist::-webkit-scrollbar{width:7px;height:7px}
+    .mxfeed::-webkit-scrollbar-track,.mxgrid::-webkit-scrollbar-track,.mxsolist::-webkit-scrollbar-track{background:transparent}
+    .mxfeed::-webkit-scrollbar-thumb,.mxgrid::-webkit-scrollbar-thumb,.mxsolist::-webkit-scrollbar-thumb{background:rgba(255,255,255,.13);border-radius:4px}
+    .mxfeed:hover::-webkit-scrollbar-thumb,.mxgrid:hover::-webkit-scrollbar-thumb{background:rgba(255,255,255,.24)}
     .mxempty{grid-row:1 / -1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px;color:#5b6573;font-size:12px;text-align:center;padding:10px}
     .mxempty input{width:160px;background:#0d1117;border:1px solid #2c3444;border-radius:6px;color:#e8ecf2;font-size:13px;padding:6px 9px;text-align:center}
     .mxempty input:focus{border-color:#3fbf5f;outline:none}
@@ -345,16 +364,25 @@
     .mxfadd input{flex:1;min-width:0;background:#0d1117;border:1px solid #2c3444;border-radius:6px;color:#e8ecf2;font-size:12px;padding:5px 8px}
     .mxfadd input:focus{border-color:#3fbf5f;outline:none}
     .mxfadd button{flex:none;background:#233152;border:1px solid #2c3444;border-radius:6px;color:#9fc0ff;font-size:13px;padding:4px 9px;cursor:pointer}
-    .mxrow{display:flex;align-items:stretch;border-bottom:1px solid rgba(255,255,255,.05);cursor:pointer;min-height:42px}
+    .mxrow{display:flex;align-items:stretch;border-bottom:1px solid rgba(255,255,255,.05);cursor:pointer;min-height:42px;position:relative}
     .mxrow:hover,.mxrow.sel{background:rgba(255,255,255,.06)}
     .mxrbar{width:5px;flex:none;background:var(--bar,#8a929c)}
+    /* СВЕЖИЙ СИГНАЛ — выделяем: подсветка фоном + свечение бара + пульс + значок 🔔 */
+    .mxrow.fresh{background:color-mix(in srgb,var(--bar,#8a929c) 16%,transparent);animation:mxfreshpulse 1.1s ease-in-out infinite}
+    .mxrow.fresh .mxrbar{width:6px;box-shadow:0 0 10px var(--bar,#8a929c),0 0 4px var(--bar,#8a929c)}
+    .mxrnew{position:absolute;top:3px;right:5px;font-size:11px;animation:mxfreshpulse 1.1s ease-in-out infinite;pointer-events:none}
+    @keyframes mxfreshpulse{0%,100%{opacity:1}50%{opacity:.45}}
     .mxrmid{flex:1;display:flex;flex-direction:column;justify-content:center;padding:4px 8px;gap:2px;min-width:0}
     .mxrsym{color:#e8ecf2;font:700 13px system-ui,Arial;letter-spacing:.3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
     .mxrtime{color:#6b7280;font:500 10px ui-monospace,monospace}
     .mxrright{display:flex;flex-direction:column;align-items:flex-end;justify-content:center;padding:4px 6px 4px 0;gap:3px}
-    .mxrchg{font:700 11px ui-monospace,monospace}
-    .mxrgap{font:700 10px ui-monospace,monospace;color:#0b0e12;background:#e6c84a;border-radius:8px;padding:1px 6px}
-    .mxrgap.g5{background:#e6a943} .mxrgap.g8{background:#ef8f4a} .mxrgap.g10{background:#ef7a3a} .mxrgap.g15{background:#ef5f5a;color:#fff} .mxrgap.g20{background:#e24a7a;color:#fff} .mxrgap.g30{background:#c02fd0;color:#fff} .mxrgap.g50{background:#9d3ff0;color:#fff}
+    .mxrsub{display:flex;align-items:center;gap:5px;min-width:0}
+    .mxrgap{font:800 13px ui-monospace,monospace;color:#e6c84a}
+    .mxpair{display:flex;align-items:center;gap:3px;font:700 8px ui-monospace,monospace}
+    .mxpump{font:800 9px ui-monospace,monospace;padding:0 4px;border-radius:3px;white-space:nowrap}
+    .mxpump.up{color:#0b0e12;background:#2ee06a}
+    .mxpump.dn{color:#fff;background:#ef5350}
+    .mxpe{color:var(--exc);opacity:.95;white-space:nowrap}
     .mxrpin{flex:none;display:flex;align-items:center;color:#5b6573;font-size:12px;padding:0 5px 0 0;cursor:pointer}
     .mxrpin:hover{color:#ef5f5a}
     .mxzoom{display:inline-flex;gap:3px}
@@ -406,7 +434,7 @@
       <div class="mxseth">Настройки сетки<button id="mxset-x">✕</button></div>
       <div class="mxsrow"><span>Колонок в ряд</span><span class="mxcols" id="mxcols"></span></div>
       <div class="mxsrow"><span>Высота ячейки</span><input type="range" id="mxcellh" min="130" max="460" step="10"><b id="mxcellhv"></b></div>
-      <div class="mxsrow"><span>Толщина линий</span><input type="range" id="mxlw" min="1" max="3.4" step="0.1"><b id="mxlwv"></b></div>
+      <div class="mxsrow"><span>Толщина линий</span><input type="range" id="mxlw" min="0.5" max="3" step="0.1"><b id="mxlwv"></b></div>
       <div class="mxsrow"><span>Ширина ленты</span><input type="range" id="mxfw" min="0" max="320" step="10"><b id="mxfwv"></b></div>
       <div class="mxsnote">Ширина ячейки = число колонок. Тяни график колесом мыши для зума по времени.</div>
     </div>
@@ -425,7 +453,7 @@
     <div class="mxbottom">
       <button id="mxaddcard" title="добавить ячейку с графиком">＋ Ячейка</button>
       <span class="mxzlbl">окно</span><span class="mxzoom" id="mxzoom"></span>
-      <label class="mxthl">порог <input id="mxthresh" type="number" min="0.5" step="0.5" value="2.5"> %</label>
+      <label class="mxthl" title="ОДИН порог: сигнал, когда монета РАЗЪЕХАЛАСЬ ≥ этого % между биржами/DEX И одновременно даёт памп/дамп ≥ этого % за ~90с">🎯 порог (спред+памп) <input id="mxthresh" type="number" min="0.5" step="0.5" value="4"> %</label>
       <span class="mxsp"></span>
       <span id="mxstat2" class="mxbhint"></span>
     </div>
@@ -503,12 +531,13 @@
 
   <div id="perfhud"></div>
   <script class="appjs" type="text/plain" data-src="/exlogos.js?v=b162"></script>
-  <script class="appjs" type="text/plain" data-src="/app.js?v=b175"></script>
+  <script class="appjs" type="text/plain" data-src="/app.js?v=b199"></script>
   <script class="appjs" type="text/plain" data-src="/trade.js?v=b176"></script>
   <script class="appjs" type="text/plain" data-src="/dock.js?v=b159"></script>
   <script class="appjs" type="text/plain" data-src="/chart.js?v=b159"></script>
-  <script class="appjs" type="text/plain" data-src="/screener.js?v=b159"></script>
-  <script class="appjs" type="text/plain" data-src="/mxdex.js?v=b186"></script>
+  <script class="appjs" type="text/plain" data-src="/screener.js?v=b200"></script>
+  <script class="appjs" type="text/plain" data-src="/classic.js?v=b216"></script>
+  <script class="appjs" type="text/plain" data-src="/mxdex.js?v=b232"></script>
   <div id="watchwin" class="wbwin hidden" style="left:20px;right:auto;top:130px;width:260px;height:380px">
     <div class="wbtitle" id="watchdrag">
       <span class="wbcoin">★ ВОЧЛИСТ</span>
@@ -551,7 +580,7 @@
   </div>
   <script class="appjs" type="text/plain" data-src="/tile.js?v=b159"></script>
   <script class="appjs" type="text/plain" data-src="/bugreport.js?v=b159"></script>
-  <script class="appjs" type="text/plain" data-src="/autobot.js?v=b174"></script>
+  <script class="appjs" type="text/plain" data-src="/autobot.js?v=b199"></script>
   <script src="/auth.js?v=b160"></script>
 </body>
 </html>

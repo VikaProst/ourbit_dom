@@ -53,16 +53,19 @@
     lbank:"lbank.com", blofin:"blofin.com", bitunix:"bitunix.com", whitebit:"whitebit.com",
     asterdex:"asterdex.com", binance:"binance.com", edgex:"edgex.exchange", lighter:"lighter.xyz", upbit:"upbit.com", binancespot:"binance.com" };
   function exMeta(ex){ return EXMETA[ex] || {lbl:(ex||"?").toUpperCase().slice(0,5), c:"#8a929c"}; }
-  // иконка биржи: фавиконка (как «MF» в MetaScalp) с фолбэком на цветной монограмм-тайл
-  function exIcon(ex){ const m=exMeta(ex), dom=EXDOM[ex], mono=(m.lbl||"?").slice(0,2);
+  // src иконки биржи: сперва ВСТРОЕННЫЙ логотип (exlogos.js, офлайн — ourbit/weex/mexc), потом фавиконка с сети
+  function exIcoSrc(ex){ const base=ex.replace(/spot$/,""); const emb=(window.EX_LOGO_DATA||{})[base];
+    if(emb) return emb; const dom=EXDOM[base]; return dom?("https://icons.duckduckgo.com/ip3/"+dom+".ico"):""; }
+  // иконка биржи: логотип с фолбэком на цветной монограмм-тайл
+  function exIcon(ex){ const m=exMeta(ex), src=exIcoSrc(ex), mono=(m.lbl||"?").slice(0,2);
     const tile='<span class="exbadge" style="background:'+m.c+'" title="'+ex+' фьючерс">'+
-      (dom?'<img class="exico" src="https://icons.duckduckgo.com/ip3/'+dom+'.ico" alt="" loading="lazy" onerror="this.remove()">':'')+
+      (src?'<img class="exico" src="'+src+'" alt="" loading="lazy" onerror="this.remove()">':'')+
       '<span class="exmono">'+mono+'</span></span>';
     return tile; }
   // мини-бейдж биржи для полоски (иконка + S/F)
-  function exStripBadge(ex){ const isSpot=ex.endsWith("spot"), letter=isSpot?"S":"F", dom=EXDOM[ex], m=exMeta(ex);
+  function exStripBadge(ex){ const isSpot=ex.endsWith("spot"), letter=isSpot?"S":"F", src=exIcoSrc(ex), m=exMeta(ex);
     return '<span class="exmini" title="'+ex+'">'+
-      (dom?'<img class="exminico" src="https://icons.duckduckgo.com/ip3/'+dom+'.ico" alt="" loading="lazy" onerror="this.remove()">':'<span class="exminimono" style="background:'+m.c+'">'+(m.lbl||"?").slice(0,1)+'</span>')+
+      (src?'<img class="exminico" src="'+src+'" alt="" loading="lazy" onerror="this.remove()">':'<span class="exminimono" style="background:'+m.c+'">'+(m.lbl||"?").slice(0,1)+'</span>')+
       '<i class="exminil '+(isSpot?"s":"f")+'">'+letter+'</i></span>'; }
   let CFG = load();
 
@@ -186,11 +189,12 @@
       const onWx  = hasS && S._weexSet && S._weexSet.has(base);
       const rowEx = tr.dataset.ex || "ourbit";
       if(typeof openSymbolOn==="function"){
-        if(rowEx==="weex" && onWx) openSymbolOn(sym,"weex");        // WEEX главная → стакан WEEX
+        if(rowEx==="mexc") openSymbolOn(sym,"mexc");                // MEXC главная → стакан MEXC (REST-поллинг, любая монета)
+        else if(rowEx==="weex" && onWx) openSymbolOn(sym,"weex");   // WEEX главная → стакан WEEX
         else if(rowEx==="ourbit" && onOur) openSymbolOn(sym,"ourbit");
         else if(onOur) openSymbolOn(sym,"ourbit");                  // фолбэк: есть на Ourbit
         else if(onWx) openSymbolOn(sym,"weex");                     // фолбэк: есть на WEEX
-        else if(typeof notify==="function") notify(base+" — DOM поддерживает только Ourbit/WEEX (эта биржа — данные)","info");
+        else openSymbolOn(sym,"mexc");                              // фолбэк: MEXC-стакан умеет любую монету
       } else if(typeof switchSymbol==="function"){ switchSymbol(sym); const inp=g("symbol"); if(inp) inp.value=base; } }; });
   }
 

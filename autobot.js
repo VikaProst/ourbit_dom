@@ -29,9 +29,16 @@
       maxHoldSec: 25,    // не пересиживать: закрыть по рынку через N сек
       aheadTicks: 1,     // «чуть раньше» ММ (поджатие): агрессивнее середины на N тиков
       deepTicks: 12,     // как глубоко искать дальнюю стену (прострел)
+      scanTicks: 60,     // окно сканирования стен от спреда, тиков (чтобы доставать жирные маркетосы, не только у мид)
       wallMinUsd: 300,   // стена меньше этого ($) не считается стеной — от неё спред не собираем
-      wallFrac: 0.3,     // стена доминирующая, если ≥ этой доли ликвидности окна
+      fixUsd: 0,         // (УДАЛЕНО из UI) легаси-поле: перебивало «Размер лота» и путало. Гасится миграцией в loadState, размер ТОЛЬКО из sizeUsd.
+      wallFrac: 0.3,     // (устар.) доля ликвидности окна
       wallKeepFrac: 0.4, // цель держим, пока у стены ≥ этой доли исходного объёма (в ±2 тика)
+      clusterGap: 2,     // склеивать соседние крупные тики в одну стену, если разрыв ≤ G тиков
+      dominanceD: 3,     // стена «торчит», если кластер ≥ D× медианы уровней окна
+      wallMode: "biggest", // выбор среди кандидатов: "near"=ближайший к спреду / "biggest"=самый жирный маркетос
+      hystPct: 0.3,      // гистерезис: не перепрыгивать на др. стену, пока она не крупнее текущей на H
+      persistMs: 500,    // антиспуф: стена валидна, только если простояла ≥ этого (не гнаться за мельканием)
       tpFrac: 0.6,       // прострел: доля пути от входа к середине для тейка
       trendSec: 10,      // окно определения тренда
       trendTicks: 4,     // мин. ход за окно, чтобы считать трендом
@@ -40,6 +47,27 @@
       requoteTicks: 3,   // переставлять заявку ТОЛЬКО если цель сместилась ≥ этого (иначе не трогать)
       cooldownSec: 2,    // пауза между сделками
       minPrintUsd: 5,    // принты мельче ($) не двигают наш филл (реализм)
+      // ── МЕХАНИКА order-flow (исследование 2026-07-06) ─────────────────────
+      wallMedianMult: 5, // стена ≥ этого × медианы уровня в окне (иначе не «стена», а шум)
+      wallAgeMs: 2000,   // стена должна ПРОСТОЯТЬ ≥ этого непрерывно (спуф снимают быстрее)
+      spoofMs: 800,      // появилась и исчезла/усохла БЕЗ сделок за < этого → спуф
+      icebergMult: 1.6,  // сквозь уровень прошло сделок > видимого размера × это, а он стоит → айсберг (доливают)
+      absVolZ: 3.0,      // absorption: Z-score объёма ленты за окно ≥ этого (реальная драка)
+      absImb: 0.6,       // absorption: |дисбаланс агрессора| ≥ этого (бьют в одну сторону)
+      absHoldTicks: 1.5, // absorption: цена сдвинулась ≤ этого тиков за окно (стена ЕСТ, не пускает) = держит
+      absWinSec: 3,      // окно расчёта absorption/дельты/Z, сек
+      brkDepthDrop: 0.30,// пробой: глубина стороны −этого доли за brkWinSec без долива
+      brkVolFrac: 0.60,  // пробой: маркет-объём > этого доли видимой глубины за окно
+      brkWinSec: 2,      // окно детекта пробоя, сек
+      obiLevels: 8,      // сколько уровней стакана в расчёте OBI-перекоса
+      obiGate: 0.6,      // |OBI| ≥ этого = направленно (котируем в сторону перекоса); < obiFlat = флэт, не котируем
+      obiFlat: 0.2,      // |OBI| < этого = флэт (нет края) → стоп котирования
+      minBookUsd: 3000,  // тонкий стакан: суммарная глубина top-N < этого $ → НЕ котируем (VANRY-защита)
+      maxSprTicks: 40,   // спред шире этого (тиков) → не котируем (проскок стопа, PAPER врёт в плюс)
+      invCapMult: 1.5,   // хард-кап инвентаря: |позиция| > лот × это → на этой стороне только флэтить
+      adverseSec: 2,     // адверс-выход: дельта против нас держится ≥ этого сек после филла → «пора выходить»
+      exitMaker: true,   // 🔑 ВЫХОД ТОЛЬКО ЛИМИТКОЙ (мейкер, 0 комсы). При «пора выходить» переставляем закр.лимитку на maker-край (лонг→ask, шорт→bid), НЕ по рынку. Маркет — ТОЛЬКО авария накопления.
+      gateEnable: true,  // мастер-переключатель гейтов absorption/OBI/тонкий-стакан (off = старое «жирная стена»)
     },
     auto: true,          // 🎯 авто-подбор гейт/тейк/стоп/глубина под монету из живого стакана
     twoSided: true,      // ⇅ ставить лимитки с ОБЕИХ сторон (у верхнего и нижнего маркетоса)
@@ -67,6 +95,9 @@
   function loadState() {
     try {
       const c = JSON.parse(localStorage.getItem("ab_cfg") || "null"); if (c) Object.assign(AB.cfg, c);
+      // МИГРАЦИЯ: раньше было 2 поля ($ лота + фикс-$), фикс ПЕРЕБИВАЛ и путал («ставлю $10, а ордер $20»).
+      // Теперь ОДНО поле «Размер лота, $» (sizeUsd) — старый fixUsd гасим навсегда, размер только из sizeUsd.
+      if (AB.cfg.fixUsd > 0) { AB.cfg.fixUsd = 0; saveState(); }
       const n = JSON.parse(localStorage.getItem("ab_conn") || "null"); if (n) Object.assign(AB.conn, n);
       const a = localStorage.getItem("ab_auto"); if (a != null) AB.auto = a === "1";
       const pp = localStorage.getItem("ab_paper"); if (pp != null) AB.paper = pp === "1";
@@ -80,29 +111,25 @@
   const snap = (p) => +(Math.round(p / tk()) * tk()).toFixed(dc());
   const now = () => (S.flow && S.flow.now ? S.flow.now : Date.now());
   const cs = () => S.contractSize || 1;
-  function vol(price) { return Math.max(1, Math.round((AB.cfg.sizeUsd || 1) / (price * cs()))); }
+  function vol(price) { const usd = AB.cfg.sizeUsd || 1; return Math.max(1, Math.round(usd / (price * cs()))); }
+  function lotUsd(price) { return AB.cfg.sizeUsd || 1; }  // notional одного лота (для порогов накопления)
+  // Мин. ордер биржи = 1 контракт. Если 1 контракт дороже лота — торговать эту монету этим лотом НЕЛЬЗЯ.
+  function minContractUsd() { const px = S.bestBid || S.bestAsk || 0; return px * cs(); }
+  function lotTooSmall() { const mc = minContractUsd(); return mc > 0 && (AB.cfg.sizeUsd || 0) < mc * 0.99; }
+  // Читаемый размер ордера: в $ И в контрактах (1 контракт монеты часто = N монет → число контрактов большое при микро-$).
+  function sizeReadout() {
+    const px = S.bestBid || S.bestAsk || 0, coin = (S.symbol || "").replace("_USDT", "");
+    const usd = AB.cfg.sizeUsd || 0;
+    if (!px) return `💵 ордер: $${usd}`;
+    const mc = minContractUsd();
+    if (lotTooSmall()) return `⛔ 1 контракт = $${Math.round(mc)} (${cs()} ${coin}) > твой лот $${usd} — НЕ ТОРГУЮ. Подними лот ≥ $${Math.ceil(mc)} или возьми монету дешевле`;
+    const ctr = Math.max(1, Math.round(usd / (px * cs())));
+    const csn = cs() > 1 ? ` · 1 контр=${cs()} ${coin}` : "";
+    return `💵 ордер: $${usd} ≈ ${ctr} контр. = $${Math.round(ctr * px * cs())}${csn}`;
+  }
   function pnlUsd(long, entry, exit, v) { return (long ? exit - entry : entry - exit) * v * cs(); }
   function ticksBetween(a, b) { return Math.round(Math.abs(a - b) / tk()); }
   function abLog(msg, kind) { AB.log.unshift({ msg, kind }); if (AB.log.length > 40) AB.log.length = 40; }
-
-  // Доминирующая «стена» на стороне в пределах maxTicks. Возвращает {price,vol,usd} или null.
-  // Стена засчитывается, только если: объём ≥ frac от ликвидности в окне И её размер ≥ minUsd$.
-  function farWallStrong(side, maxTicks, frac, minUsd) {
-    const d = S.depth; if (!d) return null;
-    const t = tk(), arr = side === "buy" ? d.bids : d.asks, best = side === "buy" ? S.bestBid : S.bestAsk;
-    if (!arr || !best) return null;
-    let bestP = null, bestV = 0, sum = 0;
-    for (const [p, v] of arr) {
-      if (!(v > 0)) continue;
-      const off = side === "buy" ? (best - p) : (p - best);
-      if (off <= 0 || off > maxTicks * t) continue;
-      sum += v; if (v > bestV) { bestV = v; bestP = p; }
-    }
-    if (bestP == null || sum <= 0 || bestV / sum < frac) return null;
-    const usd = bestV * cs() * bestP;
-    if (minUsd > 0 && usd < minUsd) return null;   // мелкая стенка — игнорируем
-    return { price: bestP, vol: bestV, usd };
-  }
 
   // Тренд по ленте за окно: +1 / -1 / 0.
   function trendDir(sec) {
@@ -132,6 +159,144 @@
     let hi = -Infinity, lo = Infinity;
     for (const p of ticks) { if (p.t < from) continue; if (p.p > hi) hi = p.p; if (p.p < lo) lo = p.p; }
     return hi < lo ? 0 : (hi - lo) / tk();
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  //  ДВИЖОК ORDER-FLOW (2026-07-06) — чтобы бот ЧЁТКО видел маркетоса.
+  //  Использует сторону агрессора S.flow.ticks[].side (1=ударил покупатель).
+  //  Считает: absorption-триггер (держит→отскок) vs пробой, OBI-перекос,
+  //  жизненный цикл стены (спуф/подтверждена/защищена-айсберг), тонкий стакан.
+  // ══════════════════════════════════════════════════════════════════════════
+  function mid() { const bb = S.bestBid, ba = S.bestAsk; return (bb && ba) ? (bb + ba) / 2 : 0; }
+  function bucketKey(p) { return Math.round(p / (S.step || tk())); }
+
+  // Стата ленты за окно С УЧЁТОМ агрессора: buy/sell объём ($), дисбаланс [-1..1].
+  function tapeStats(sec) {
+    const ticks = (S.flow && S.flow.ticks) || [], from = now() - sec * 1000;
+    let bV = 0, sV = 0, n = 0;
+    for (const p of ticks) { if (p.t < from) continue; const u = p.v * cs() * p.p; if (p.side === 1) bV += u; else sV += u; n++; }
+    const tot = bV + sV;
+    return { buyUsd: bV, sellUsd: sV, tot, imb: tot > 0 ? (bV - sV) / tot : 0, n };
+  }
+  // OBI-перекос стакана по top-N уровням: (ΣBid−ΣAsk)/(ΣBid+ΣAsk) ∈ [-1..1].
+  function computeOBI(nLev) {
+    const d = S.depth; if (!d || !d.bids || !d.asks) return { obi: 0, bookUsd: 0 };
+    let b = 0, a = 0;
+    for (let i = 0; i < nLev; i++) { const bd = d.bids[i], ak = d.asks[i]; if (bd) b += bd[1] * cs() * bd[0]; if (ak) a += ak[1] * cs() * ak[0]; }
+    const t = b + a;
+    return { obi: t > 0 ? (b - a) / t : 0, bookUsd: t };
+  }
+  // Раз в шаг: пересчитать сигналы (кэш в AB.sig). Volume Z — по сэмплам объёма окна ~1/сек.
+  function updateSignals() {
+    const C = AB.cfg, ms = Date.now(), t = tk();
+    const st = tapeStats(C.absWinSec);
+    if (ms - (AB._volSampAt || 0) >= 900) { AB._volSampAt = ms; const h = AB._volHist || (AB._volHist = []); h.push(st.tot); if (h.length > 90) h.shift(); }
+    const h = AB._volHist || []; let volZ = 0;
+    if (h.length >= 10) { const m = h.reduce((a, b) => a + b, 0) / h.length; const v = h.reduce((a, b) => a + (b - m) * (b - m), 0) / h.length; const sd = Math.sqrt(v); volZ = sd > 0 ? (st.tot - m) / sd : 0; }
+    const cm = mid(), mh = AB._midHist || (AB._midHist = []);
+    if (cm) mh.push({ t: ms, p: cm }); while (mh.length && mh[0].t < ms - C.absWinSec * 1000) mh.shift();
+    const movedT = (mh.length && cm) ? Math.abs(cm - mh[0].p) / t : 0;
+    const ob = computeOBI(C.obiLevels);
+    AB.sig = { volZ, imb: st.imb, movedT, obi: ob.obi, bookUsd: ob.bookUsd, tot: st.tot, buyUsd: st.buyUsd, sellUsd: st.sellUsd, at: ms };
+    return AB.sig;
+  }
+  // ABSORPTION на стороне: объём большой (Z), бьют в стену (дисбаланс), а цена НЕ идёт → стена ест → отскок.
+  //  side="buy": мы лонг от бид-стены → агрессия ДОЛЖНА быть на продажу (imb<0), но цена держится.
+  function absorbing(side) {
+    const s = AB.sig, C = AB.cfg; if (!s) return false;
+    if (s.volZ < C.absVolZ) return false;              // нет «драки» за уровень
+    if (s.movedT > C.absHoldTicks) return false;       // цена ушла = не absorb (пробой/дрейф)
+    return side === "buy" ? s.imb <= -C.absImb : s.imb >= C.absImb;
+  }
+  // ПРОБОЙ: большой объём + цена ПОШЛА, либо маркет-объём съедает видимую глубину.
+  function breaking(side) {
+    const s = AB.sig, C = AB.cfg; if (!s) return false;
+    if (s.volZ >= C.absVolZ && s.movedT > C.absHoldTicks * 2) return true;
+    if (s.bookUsd > 0 && s.tot > s.bookUsd * C.brkVolFrac) return true;
+    return false;
+  }
+  // Трекинг стен во времени (одна модель на сторону). Классификация: spoof/confirming/confirmed/defended.
+  //  🔑 КЛАСТЕРИЗАЦИЯ: размазанный маркетос (соседние уровни, разрыв ≤ clusterGap бакетов) = ОДНА стена.
+  //  px стены = БЛИЖНИЙ к спреду край кластера (лимитка встаёт впереди КРАЯ, а не в середине маркетоса!).
+  //  traded = сколько $ проторговано СКВОЗЬ бакеты кластера с прошлого шага (для айсберга).
+  function updateWallsSide(side, tradedMap) {
+    const d = S.depth; if (!d) return [];
+    const t = tk(), C = AB.cfg, scan = Math.max(C.deepTicks || 12, C.scanTicks || 60);
+    const arr = side === "buy" ? d.bids : d.asks, best = side === "buy" ? S.bestBid : S.bestAsk;
+    if (!arr || !best) return [];
+    // 1) уровни в окне
+    const lv = [];
+    for (const [p, v] of arr) {
+      if (!(v > 0)) continue;
+      const off = side === "buy" ? (best - p) : (p - best);
+      if (off <= 0 || off > scan * t) continue;
+      lv.push({ p, v, usd: v * cs() * p, offT: Math.round(off / t), bk: bucketKey(p) });
+    }
+    const nowMs = Date.now(), trk = AB.wallTrk || (AB.wallTrk = { buy: new Map(), sell: new Map() }), m = trk[side];
+    if (!lv.length) { for (const [k, w] of m) { if (nowMs - w.lastSeen > 1500) m.delete(k); } return []; }
+    const med = median(lv.map((l) => l.usd)) || 1;
+    lv.sort((a, b) => a.offT - b.offT);
+    // 2) кластеры ТОЛЬКО из КРУПНЫХ уровней (≥ 2× медианы) — иначе мелочь склеивает весь стакан
+    //    в один кластер и «край» оказывается мелким уровнем у спреда (лимитка не там!).
+    const G = C.clusterGap || 2, cls = [];
+    const big = lv.filter((l) => l.usd >= med * 2);
+    for (const l of big) {
+      const last = cls[cls.length - 1];
+      if (last && Math.abs(l.bk - last.lastBk) <= G) {
+        last.usd += l.usd; last.lastBk = l.bk; last.traded += tradedMap.get(l.bk) || 0;
+        if (l.v > last.peakV) { last.peakV = l.v; last.peakP = l.p; }
+      } else cls.push({ edgeP: l.p, edgeBk: l.bk, lastBk: l.bk, offT: l.offT, usd: l.usd, peakV: l.v, peakP: l.p, traded: tradedMap.get(l.bk) || 0 });
+    }
+    // 3) трекинг кластеров во времени по ближнему краю (край дрожит ±бакет → матчим по близости)
+    const alive = new Set(), out = [];
+    for (const c of cls) {
+      let w = null, bd = G + 2;
+      for (const [k, x] of m) { const dd = Math.abs(k - c.edgeBk); if (dd <= G + 1 && dd < bd) { bd = dd; w = x; } }
+      if (!w) { w = { key: c.edgeBk, bornAt: nowMs, traded: 0, refills: 0, wasBelow: false, peakUsd: c.usd, peakV: 0 }; m.set(c.edgeBk, w); }
+      else if (w.key !== c.edgeBk) { m.delete(w.key); w.key = c.edgeBk; m.set(c.edgeBk, w); }   // край сместился — переносим трек
+      w.lastSeen = nowMs; w.px = c.edgeP; w.curUsd = c.usd; w.peakV = Math.max(w.peakV, c.peakV); w.offT = c.offT;
+      if (c.usd > w.peakUsd) w.peakUsd = c.usd;
+      if (c.usd < w.peakUsd * 0.4) w.wasBelow = true;                            // просел
+      else if (w.wasBelow && c.usd >= w.peakUsd * 0.8) { w.refills++; w.wasBelow = false; }  // вернулся = долив
+      w.traded += c.traded;
+      alive.add(w.key);
+      const age = nowMs - w.bornAt;
+      w.age = age; w.median = med;
+      w.isWall = c.usd >= C.wallMedianMult * med && c.usd >= (C.wallMinUsd > 0 ? C.wallMinUsd : 0);
+      w.iceberg = w.peakUsd > 0 && w.traded > w.peakUsd * C.icebergMult;         // проторговано > видимого = доливают
+      const shrankNoTrade = (w.curUsd < w.peakUsd * 0.3) && (w.traded < w.peakUsd * 0.2) && age < C.spoofMs * 5;
+      if (shrankNoTrade) w.cls = "spoof";                                        // усох без сделок = спуф
+      else if (age < C.wallAgeMs) w.cls = "confirming";                          // ещё не простоял
+      else if (w.iceberg || w.refills >= 1) w.cls = "defended";                  // держат (айсберг/долив)
+      else if (w.isWall) w.cls = "confirmed";
+      else w.cls = "weak";
+      if (w.isWall || w.cls === "defended") out.push(w);
+    }
+    for (const [k, w] of m) { if (!alive.has(k) && nowMs - w.lastSeen > 1500) m.delete(k); }  // ушедшие стены отпадают
+    return out.sort((a, b) => a.offT - b.offT);
+  }
+  // Раз в шаг: посчитать проторгованное сквозь бакеты с прошлого шага, обновить обе стороны.
+  function stepWalls() {
+    const ticks = (S.flow && S.flow.ticks) || [], wm = AB._wallSeenT || 0; let maxT = wm; const traded = new Map();
+    for (const pr of ticks) { if (pr.t <= wm) continue; if (pr.t > maxT) maxT = pr.t; const bk = bucketKey(pr.p); traded.set(bk, (traded.get(bk) || 0) + pr.v * cs() * pr.p); }
+    AB._wallsBuy = updateWallsSide("buy", traded);
+    AB._wallsSell = updateWallsSide("sell", traded);
+    AB._wallSeenT = maxT;
+  }
+  // Почему сейчас НЕЛЬЗЯ котировать на стороне (null = можно). Гейты из исследования.
+  function quotingBlocked(side) {
+    const C = AB.cfg;
+    if (lotTooSmall()) return `1 контракт $${Math.round(minContractUsd())} > лот $${C.sizeUsd} — подними лот`;   // мин.ордер биржи дороже лота (защита ВСЕГДА, даже при gateEnable=off)
+    if (!C.gateEnable) return null;
+    const s = AB.sig; if (!s) return "нет сигналов";
+    const bb = S.bestBid, ba = S.bestAsk, t = tk(); if (!bb || !ba || ba <= bb) return "нет стакана";
+    if (Math.round((ba - bb) / t) > C.maxSprTicks) return "спред широк";
+    if (s.bookUsd < C.minBookUsd) return "тонкий стакан";
+    if (Math.abs(s.obi) < C.obiFlat) return "флэт (OBI)";
+    if (side === "buy" && s.obi <= -C.obiFlat) return "OBI против лонга";
+    if (side === "sell" && s.obi >= C.obiFlat) return "OBI против шорта";
+    if (breaking(side)) return "пробой";
+    return null;
   }
 
   // РЕАЛИСТИЧНЫЙ филл: заявка филлится не по касанию, а когда:
@@ -175,102 +340,58 @@
     // wallMinUsd НЕ трогаем — стены задаёт Вика сама (её поле «Размер стены ММ, $»).
   }
 
-  // Ближайший МАРКЕТОС (доминирующая стена ≥ minUsd$) на стороне в пределах maxTicks от бэста.
-  function nearestWall(side, maxTicks, minUsd) {
-    const d = S.depth; if (!d) return null;
-    const t = tk(), arr = side === "buy" ? d.bids : d.asks, best = side === "buy" ? S.bestBid : S.bestAsk;
-    if (!arr || !best) return null;
-    let bestOff = Infinity, res = null;
-    for (const [p, v] of arr) {
-      if (!(v > 0)) continue;
-      const off = side === "buy" ? (best - p) : (p - best);
-      if (off <= 0 || off > maxTicks * t) continue;
-      const usd = v * cs() * p;
-      if (usd >= minUsd && off < bestOff) { bestOff = off; res = { price: p, vol: v, usd, offT: Math.round(off / t) }; }
-    }
-    return res;
-  }
+  function median(a) { if (!a.length) return 0; const s = a.slice().sort((x, y) => x - y), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; }
 
-  // ДОМИНИРУЮЩАЯ стена: самый КРУПНЫЙ уровень в окне; засчитывается только если ≥ minUsd И доминирует
-  // (≥ frac от суммарной ликвидности окна). Так встаём у настоящего большого маркетоса, а не у мелочи/середины.
-  function dominantWall(side, maxTicks, minUsd, frac) {
-    const d = S.depth; if (!d) return null;
-    const t = tk(), arr = side === "buy" ? d.bids : d.asks, best = side === "buy" ? S.bestBid : S.bestAsk;
-    if (!arr || !best) return null;
-    let bestL = null, sum = 0;
-    for (const [p, v] of arr) {
-      if (!(v > 0)) continue;
-      const off = side === "buy" ? (best - p) : (p - best);
-      if (off <= 0 || off > maxTicks * t) continue;
-      const usd = v * cs() * p; sum += usd;
-      if (!bestL || usd > bestL.usd) bestL = { p, v, usd, off };
-    }
-    if (!bestL) return null;
-    if (minUsd > 0 && bestL.usd < minUsd) return null;
-    if (frac > 0 && sum > 0 && bestL.usd / sum < frac) return null;
-    return { price: bestL.p, vol: bestL.v, usd: bestL.usd, offT: Math.round(bestL.off / t) };
+  // ВЫБОР стены из модели: не спуф, простояла, ≥ порога; и (защищена ИЛИ идёт absorption).
+  function pickWall(side) {
+    const walls = side === "buy" ? (AB._wallsBuy || []) : (AB._wallsSell || []);
+    const C = AB.cfg, minUsd = C.wallMinUsd > 0 ? C.wallMinUsd : 0;
+    let cand = walls.filter((w) => (w.cls === "confirmed" || w.cls === "defended") && w.peakUsd >= minUsd);
+    if (!cand.length) return null;
+    const abs = absorbing(side);
+    cand = cand.filter((w) => w.cls === "defended" || abs);   // защищённая (айсберг/долив) годна всегда; обычная — только при absorption
+    if (!cand.length) return null;
+    if (C.wallMode === "near") return cand.reduce((a, b) => (b.offT < a.offT ? b : a));
+    return cand.reduce((a, b) => (b.peakUsd > a.peakUsd ? b : a));   // самый жирный маркетос
   }
-  // «Стена жива» — устойчиво к дрожанию: максимум объёма в ±2 тика от якоря ≥ wallKeepFrac исходного.
-  function wallAliveAt(side, wallPx, wallVol0) {
-    if (!wallPx || !(wallVol0 > 0)) return false;
-    const t = tk(); let best = 0;
-    for (let k = -2; k <= 2; k++) { const v = queueAt(side, snap(wallPx + k * t)); if (v > best) best = v; }
-    return best >= wallVol0 * (AB.cfg.wallKeepFrac || 0.4);
-  }
-  // «Стена мертва» подтверждается 3 подряд мёртвыми чтениями (гасит транзиентный gap=0 стакана).
-  function wallDeadConfirmed(side, cur) {
-    const k = side === "buy" ? "_deadBuy" : "_deadSell";
-    if (wallAliveAt(side, cur.wallPx, cur.wallVol)) { AB[k] = 0; return false; }
-    AB[k] = (AB[k] || 0) + 1;
-    return AB[k] >= 3;
-  }
-  // ЗАЛОК ЦЕЛИ: единственная точка расчёта цены. Пока стена жива — цель НЕ меняется (лимитка стоит, ждёт прострел).
+  // ЦЕЛЬ на сторону: гейты → выбор стены → лимитка на тик впереди стены. Гистерезис (не прыгать между стенами).
   function getTarget(side) {
-    const key = side === "buy" ? "tgtBuy" : "tgtSell", cur = AB[key], t = tk(), C = AB.cfg;
-    if (cur && !wallDeadConfirmed(side, cur)) return cur;
-    const range = Math.max(C.deepTicks || 12, 60);
-    const wall = dominantWall(side, range, C.wallMinUsd > 0 ? C.wallMinUsd : 0, C.wallFrac || 0.3);
-    if (!wall) { AB[key] = null; AB._noWall = true; return null; }
-    AB._noWall = false;
-    const buy = side === "buy";
-    const price = buy ? snap(wall.price + C.aheadTicks * t) : snap(wall.price - C.aheadTicks * t);
-    const tp = buy ? snap(price + C.profitTicks * t) : snap(price - C.profitTicks * t);
-    AB[key] = { side, price, tpPrice: tp, wallPx: wall.price, wallVol: wall.vol, offT: wall.offT, usd: wall.usd, bornAt: Date.now() };
+    const key = side === "buy" ? "tgtBuy" : "tgtSell", C = AB.cfg, t = tk();
+    const blk = quotingBlocked(side);
+    if (blk) { AB[key] = null; AB._noWall = true; AB[side === "buy" ? "_blkBuy" : "_blkSell"] = blk; return null; }
+    const w = pickWall(side);
+    if (!w) { AB[key] = null; AB._noWall = true; AB[side === "buy" ? "_blkBuy" : "_blkSell"] = "нет стены (спуф/тонко/не absorb)"; return null; }
+    AB._noWall = false; AB[side === "buy" ? "_blkBuy" : "_blkSell"] = null;
+    const mkP = (wp) => side === "buy" ? snap(wp + C.aheadTicks * t) : snap(wp - C.aheadTicks * t);
+    const mkTp = (pr) => side === "buy" ? snap(pr + C.profitTicks * t) : snap(pr - C.profitTicks * t);
+    const cur = AB[key], H = C.hystPct || 0.3;
+    if (cur) {                                                    // держимся за свою стену, пока рядом и новая не крупнее на H
+      if (Math.abs(w.px - cur.wallPx) <= (C.clusterGap || 2) * t || w.peakUsd < (cur.usd || 0) * (1 + H)) {
+        cur.wallPx = w.px; cur.usd = w.peakUsd; cur.price = mkP(w.px); cur.tpPrice = mkTp(cur.price); cur.offT = w.offT; cur.cls = w.cls; cur.wallVol = w.peakV; cur.wallVol0 = w.peakV;
+        return cur;
+      }
+    }
+    const price = mkP(w.px);
+    AB[key] = { side, price, tpPrice: mkTp(price), wallPx: w.px, wallVol: w.peakV, wallVol0: w.peakV, usd: w.peakUsd, offT: w.offT, cls: w.cls, iceberg: !!w.iceberg, bornAt: Date.now() };
+    abLog(`[цель ${side === "buy" ? "BUY" : "SELL"} ${w.cls}${w.iceberg ? " 🧊" : ""}] стена@${w.px.toFixed(dc())} $${Math.round(w.peakUsd)} ${w.offT}т → лимит@${price.toFixed(dc())}`);
     return AB[key];
   }
 
-  // ── ЯКОРЬ К МАРКЕТОСУ: лимитку ставим на тик ВПЕРЕДИ ближайшей крупной стены. ──
-  // Тренд решает сторону (не входить против тренда). Нет стены рядом → В ПУСТОТУ НЕ СТАВИМ.
+  // ── ВХОД: через движок getTarget (гейты + модель стены). Одна нога = ближайшая допустимая сторона. ──
   function planEntry(bb, ba, sprT) {
-    const t = tk(), C = AB.cfg;
-    const dir = trendDir(C.trendSec);
-    const allowBuy = dir >= 0, allowSell = dir <= 0;
-    const range = Math.max(C.deepTicks || 12, 60);
-    const minUsd = C.wallMinUsd > 0 ? C.wallMinUsd : 0, frac = C.wallFrac || 0.3;
-    const wb = allowBuy ? dominantWall("buy", range, minUsd, frac) : null;
-    const ws = allowSell ? dominantWall("sell", range, minUsd, frac) : null;
-    let side = null, wall = null;
-    if (wb && ws) { if (wb.offT <= ws.offT) { side = "buy"; wall = wb; } else { side = "sell"; wall = ws; } }
-    else if (wb) { side = "buy"; wall = wb; }
-    else if (ws) { side = "sell"; wall = ws; }
-    else { AB._noWall = true; return null; }                    // маркетоса ≥ minUsd рядом нет → ждём
-    AB._noWall = false;
-    const buy = side === "buy";
-    const price = buy ? snap(wall.price + C.aheadTicks * t) : snap(wall.price - C.aheadTicks * t);   // на тик впереди стены («чуть раньше»)
-    const tp = buy ? snap(price + C.profitTicks * t) : snap(price - C.profitTicks * t);
-    return { side, price, tpPrice: tp, wallPx: wall.price, wallVol: wall.vol, kind: `маркетос ${wall.offT}т $${Math.round(wall.usd)}` };
+    const tb = getTarget("buy"), ts = getTarget("sell");
+    let tgt = null;
+    if (tb && ts) tgt = tb.offT <= ts.offT ? tb : ts;
+    else tgt = tb || ts;
+    if (!tgt) { AB._noWall = true; return null; }
+    return { side: tgt.side, price: tgt.price, tpPrice: tgt.tpPrice, wallPx: tgt.wallPx, wallVol: tgt.wallVol,
+             kind: `${tgt.cls}${tgt.iceberg ? " 🧊" : ""} ${tgt.offT}т $${Math.round(tgt.usd)}` };
   }
-
-  // План для ОДНОЙ стороны — ближайший маркетос этой стороны (для двустороннего режима, БЕЗ тренд-фильтра).
+  // План для ОДНОЙ стороны (двусторонний режим) — та же цель из движка.
   function planSide(side) {
-    const t = tk(), C = AB.cfg;
-    const range = Math.max(C.deepTicks || 12, 90), minUsd = C.wallMinUsd > 0 ? C.wallMinUsd : 500;
-    const wall = nearestWall(side, range, minUsd);
-    if (!wall) return null;
-    const buy = side === "buy";
-    const price = buy ? snap(wall.price + C.aheadTicks * t) : snap(wall.price - C.aheadTicks * t);
-    const tp = buy ? snap(price + C.profitTicks * t) : snap(price - C.profitTicks * t);
-    return { side, price, tpPrice: tp, wallPx: wall.price, wallVol: wall.vol, offT: wall.offT, usd: wall.usd };
+    const tgt = getTarget(side);
+    if (!tgt) return null;
+    return { side, price: tgt.price, tpPrice: tgt.tpPrice, wallPx: tgt.wallPx, wallVol: tgt.wallVol, offT: tgt.offT, usd: tgt.usd };
   }
 
   // ── PAPER двусторонний: держим лимитки с обеих сторон (qBuy/qSell), любой прострел ловим ──
@@ -282,7 +403,7 @@
   }
   function fillFromQuote(q) {                                   // одна сторона залилась → позиция + тейк + СНЯТЬ ВСЕ заявки
     const long = q.side === "buy", sn = now(), cside = long ? "sell" : "buy";
-    AB.pos = { long, price: q.price, vol: q.vol, t: sn, kind: "2стор" };
+    AB.pos = { long, price: q.price, vol: q.vol, t: sn, kind: "2стор", wallPx: q.wallPx, wallVol0: q.wallVol };
     AB.close = { side: cside, price: q.tpPrice, since: sn, _seen: sn, queue: queueAt(cside, q.tpPrice), fillVol: 0 };
     AB.qBuy = null; AB.qSell = null; AB.state = "inpos";
     abLog(`✅ ЗАЛИЛО ${long ? "LONG" : "SHORT"} @${q.price.toFixed(dc())} — тейк @${q.tpPrice.toFixed(dc())} (лимитки сняты)`, "ok");
@@ -290,7 +411,7 @@
   function manageSidePaper(side) {                              // ставим/держим у ЗАЛОЧЕННОЙ цели (getTarget)
     const key = side === "buy" ? "qBuy" : "qSell", cur = AB[key], tgt = getTarget(side);
     if (!tgt) { if (cur) AB[key] = null; return; }              // маркетоса нет → снять
-    if (cur && ticksBetween(cur.price, tgt.price) < 0.5) return; // цена та же → держим, ждём прострел (не пересоздаём)
+    if (cur && ticksBetween(cur.price, tgt.price) < (AB.cfg.requoteTicks || 3)) return; // маркетос там же → держим, ждём прострел
     AB[key] = makePaperQuote(tgt);
     abLog(`[2стор ${side === "buy" ? "BUY" : "SELL"} маркетос ${tgt.offT}т $${Math.round(tgt.usd)}] @${tgt.price.toFixed(dc())}`);
   }
@@ -311,7 +432,7 @@
   }
   function onEntryFilled() {
     const e = AB.entry, long = e.side === "buy", sn = now(), cside = long ? "sell" : "buy";
-    AB.pos = { long, price: e.price, vol: e.vol, t: sn, kind: e.kind };
+    AB.pos = { long, price: e.price, vol: e.vol, t: sn, kind: e.kind, wallPx: e.wallPx, wallVol0: e.wallVol };
     AB.close = { side: cside, price: e.tpPrice, since: sn, _seen: sn, queue: queueAt(cside, e.tpPrice), fillVol: 0 };
     AB.entry = null; AB.state = "inpos";
     abLog(`✅ ЗАЛИЛО ${long ? "LONG" : "SHORT"} @${AB.pos.price.toFixed(dc())} — тейк @${AB.close.price.toFixed(dc())}`, "ok");
@@ -322,13 +443,24 @@
     AB.stats.trades++; if (pl >= 0) AB.stats.wins++; else AB.stats.losses++;
     AB.stats.pnlUsd += pl; AB.stats.ticksSum += tks;
     abLog(`${pl >= 0 ? "💚" : "❌"} ЗАКРЫТО (${reason}) @${price.toFixed(dc())} · ${tks >= 0 ? "+" : ""}${tks.toFixed(1)}т · ${pl >= 0 ? "+" : ""}$${pl.toFixed(3)}${taker ? " (тейкер)" : ""}`, pl >= 0 ? "ok" : "err");
-    AB.pos = null; AB.close = null; AB.entry = null; AB.state = "idle";
+    AB.pos = null; AB.close = null; AB.entry = null; AB.state = "idle"; AB._closeChasing = false;
     AB.cooldownUntil = now() + AB.cfg.cooldownSec * 1000;
   }
   // Стена-якорь ещё жива? (объём на её цене не съеден/не снят). Пока жива — заявку НЕ трогаем, ждём прострел.
   function wallAlive(order) {
     if (!order.wallPx) return false;
     return queueAt(order.side, order.wallPx) >= (order.wallVol || 0) * 0.4;
+  }
+  // СТРУКТУРНЫЙ выход: стену-якорь съели (на её цене осталось <40% от пика) → гипотеза «держит» не работает.
+  function wallEaten(pos) {
+    if (!pos.wallPx || !(pos.wallVol0 > 0)) return false;
+    const side = pos.long ? "buy" : "sell";
+    return queueAt(side, snap(pos.wallPx)) < pos.wallVol0 * 0.4;
+  }
+  // АДВЕРС-филл: после входа поток агрессивно идёт ПРОТИВ нас (нас пикнули перед ходом против).
+  function adverseFill(pos) {
+    const s = AB.sig; if (!s) return false;
+    return pos.long ? s.imb < -AB.cfg.absImb : s.imb > AB.cfg.absImb;
   }
   function maybeRequote(bb, ba, sprT) {
     const e = AB.entry, C = AB.cfg;
@@ -338,17 +470,21 @@
     if (!plan) { abLog("маркетос ушёл — снимаю заявку"); AB.entry = null; AB.state = "idle"; return; }
     if (plan.side !== e.side || ticksBetween(plan.price, e.price) >= (C.requoteTicks || 3)) placeEntry(plan);
   }
-  // PAPER: позицию закрываем ТОЛЬКО лимиткой (тейк). Долго не дошёл → двигаем лимит закрытия к рынку (маркер), без маркета.
+  // PAPER: тейк — лимитка (мейкер); убыток/время — режем по рынку (иначе убыток не фиксируется).
   function manageCloseLimit(bb, ba) {
-    const p = AB.pos, C = AB.cfg, ms = now();
-    if (ms - p.t >= C.maxHoldSec * 1000) {
-      const edge = p.long ? ba : bb, newPx = snap(edge);
-      if (ticksBetween(newPx, AB.close.price) >= 1) {
-        AB.close.price = newPx; AB.close.since = ms; AB.close._seen = ms; AB.close.fillVol = 0; AB.close.queue = queueAt(AB.close.side, newPx);
-        p.t = ms;
-        abLog(`тейк не дошёл — лимит закрытия к рынку @${newPx.toFixed(dc())}`);
-      }
+    const p = AB.pos, C = AB.cfg, ms = now(), t = tk();
+    const adverse = p.long ? bb : ba, lossT = p.long ? (p.price - adverse) / t : (adverse - p.price) / t;
+    const held = ms - p.t;
+    // «пора выходить активнее» — но ВСЁ РАВНО ЛИМИТКОЙ (мейкер, 0 комсы), НЕ по рынку.
+    const reason = (held > 1000 && wallEaten(p)) ? "стену съели"
+      : (held > C.adverseSec * 1000 && lossT >= 1 && adverseFill(p)) ? "адверс"
+      : (lossT >= C.stopTicks) ? `стоп ${C.stopTicks}т`
+      : (held >= C.maxHoldSec * 1000) ? `время ${C.maxHoldSec}с` : null;
+    if (reason && AB.close) {                                    // переставить закр.лимитку на maker-край выхода (лонг→ask, шорт→bid) — ловим спред, комса 0
+      const mk = p.long ? snap(ba) : snap(bb);
+      if (Math.abs(AB.close.price - mk) >= t * 0.5) { AB.close.price = mk; AB.close.since = ms; AB.close._seen = ms; AB.close.queue = queueAt(AB.close.side, mk); AB.close.fillVol = 0; if (!AB._closeChasing) abLog(`↩ выход лимиткой (${reason}) @${mk.toFixed(dc())}`); AB._closeChasing = true; }
     }
+    // фактический филл проверяется в step() через printFilled(AB.close) (мейкер, taker=false). Рынком НЕ закрываем.
   }
 
   // ── главный цикл ──────────────────────────────────────────────────────────
@@ -400,7 +536,13 @@
   function mexcCancelAllReal() { return abPost("/api/mexccancelall", { symbol: S.symbol }); }
   function mexcPos() { const a = AB._mexcAcct; return (a && a.positions && a.positions[0]) || null; }
   const RSIDE = { OPEN_LONG: 1, CLOSE_SHORT: 2, OPEN_SHORT: 3, CLOSE_LONG: 4 }, ROT = { LIMIT: 1, MARKET: 5 };
-  function mexcCloseMarket(pos) { mexcOrder(pos.side === 1 ? RSIDE.CLOSE_LONG : RSIDE.CLOSE_SHORT, ROT.MARKET, 0, pos.vol, pos.id); }
+  function mexcCloseMarket(pos) { return mexcOrder(pos.side === 1 ? RSIDE.CLOSE_LONG : RSIDE.CLOSE_SHORT, ROT.MARKET, 0, pos.vol, pos.id); }
+  // Ответ на закрытие: «позиция закрыта/нет» (2009/2008) → бот В IDLE (не долбить закрытие).
+  function closeRespIdle(r) {
+    const code = r && r.resp && r.resp.code;
+    if (code === 2009 || code === 2008) { AB.pos = null; AB.close = null; AB.state = "idle"; AB.io = {}; AB._realCd = Date.now() + 2000; abLog("позиция уже закрыта — сброс", "ok"); return true; }
+    return false;
+  }
   async function mexcAcctPoll() {
     if (AB.paper || !S.exMexc || !AB._mexcConn || !AB.on) return;
     try { const r = await fetch("/api/mexcaccount?symbol=" + encodeURIComponent(S.symbol)).then((x) => x.json()); if (r && r.ok) AB._mexcAcct = r; } catch (e) {}
@@ -408,14 +550,21 @@
   // ── МЕХАНИЗМ INTENT per-side: NONE→PENDING→LIVE с таймаутом ожидания поллинга (анти-дубль, устойчив к лагу) ──
   const IO_PENDING_MS = 3000;
   function ioSlot(side) { if (!AB.io) AB.io = {}; return AB.io[side] || (AB.io[side] = { state: "NONE", price: 0, id: 0, at: 0, busy: false }); }
-  function cancelSideById(side, id) { const io = ioSlot(side); io.busy = true; abPost("/api/mexccancel", { id }).then(() => { io.busy = false; io.state = "NONE"; io.id = 0; }); }
+  const REQ_GAP_MS = 1300;      // не чаще ~1 запроса/1.3с к MEXC (иначе «Requests are too frequent»)
+  function reqThrottled(ms) { return ms < (AB._reqCd || 0); }
+  function markReq(ms) { AB._reqCd = ms + REQ_GAP_MS; }
+  function cancelSideById(side, id) { const io = ioSlot(side); io.busy = true; markReq(Date.now()); abPost("/api/mexccancel", { id }).then(() => { io.busy = false; io.state = "NONE"; io.id = 0; }); }
   function placeSide(side, want, ms) {
-    const io = ioSlot(side); io.busy = true; io.state = "PENDING"; io.price = want.price; io.at = ms;
+    const io = ioSlot(side); io.busy = true; io.state = "PENDING"; io.price = want.price; io.at = ms; markReq(ms);
     const oside = side === "buy" ? RSIDE.OPEN_LONG : RSIDE.OPEN_SHORT;
     mexcOrder(oside, ROT.LIMIT, want.price, vol(want.price), 0).then((r) => {
       io.busy = false;
-      if (r && r.ok) abLog(`[РЕАЛ 2стор ${side === "buy" ? "BUY" : "SELL"} ${want.offT}т] @${want.price.toFixed(dc())}`);
-      else { io.state = "NONE"; abLog(`MEXC ${side} отклонён: ${(r && (r.error || (r.resp && r.resp.message))) || "?"}`, "err"); }
+      if (r && r.ok) abLog(`[РЕАЛ ${side === "buy" ? "BUY" : "SELL"}] стена@${(want.wallPx || 0).toFixed(dc())} $${Math.round(want.usd || 0)} → лимит@${want.price.toFixed(dc())} (${want.offT}т) · ордер ${vol(want.price)} контр ≈ $${Math.round(vol(want.price) * want.price * cs())}`);
+      else {                                                     // ОТКАЗ → пауза на эту сторону (не долбим биржу), причина в лог
+        const msg = (r && (r.error || (r.resp && r.resp.message))) || "?";
+        io.state = "NONE"; io.retryAt = Date.now() + (/frequent|too many|429/i.test(msg) ? 8000 : 6000);
+        abLog(`MEXC ${side} отклонён: ${msg}`, "err");
+      }
     });
   }
   // Реконсилер ОДНОЙ стороны: приводим реальные ордера к желаемому (ровно 1 у цели). Устойчив к лагу поллинга.
@@ -424,11 +573,12 @@
     const openSide = side === "buy" ? RSIDE.OPEN_LONG : RSIDE.OPEN_SHORT;
     const tol = ((AB.cfg.requoteTicks || 3) + 0.5) * t;
     const mine = orders.filter((o) => o.side === openSide);
-    if (mine.length > 1) { if (!io.busy) cancelSideById(side, mine[1].id); return; }   // дедуп: лишний снять
     const live = mine[0] || null;
     if (live) { io.state = "LIVE"; io.id = live.id; io.price = live.price; }
-    else if (io.state === "PENDING") { if (ms - io.at > IO_PENDING_MS) io.state = "NONE"; else return; }   // ждём отражения — НЕ дублируем
-    if (io.busy) return;
+    else if (io.state === "LIVE") { io.state = "GONE"; io.at = ms; return; }   // была LIVE, исчезла → МОГЛА ЗАЛИТЬСЯ! ждём поллинг позиции, НЕ ставим новую (анти-накопление)
+    else if (io.state === "GONE" || io.state === "PENDING") { if (ms - io.at > IO_PENDING_MS) io.state = "NONE"; else return; }   // ждём отражения — НЕ дублируем
+    if (io.busy || reqThrottled(ms) || ms < (io.retryAt || 0)) return;   // троттл частоты + пауза после отказа
+    if (mine.length > 1) { cancelSideById(side, mine[1].id); return; }   // дедуп: лишний снять
     if (want == null) { if (live) cancelSideById(side, live.id); else io.state = "NONE"; return; }
     if (live) { if (Math.abs(live.price - want.price) > tol) cancelSideById(side, live.id); return; }   // цена совпала → СТОИМ (ждём прострел)
     placeSide(side, want, ms);
@@ -439,9 +589,9 @@
     const long = pos.side === 1, t = tk(), C = AB.cfg;
     const tp = long ? snap(pos.avg + C.profitTicks * t) : snap(pos.avg - C.profitTicks * t);
     mexcCancelAllReal(); AB.io = {};
-    AB.pos = { long, price: pos.avg, vol: pos.vol, t: ms, kind: "2стор" };
+    AB.pos = { long, price: pos.avg, vol: pos.vol, t: ms, kind: "2стор", wallPx: (long ? (AB.tgtBuy && AB.tgtBuy.wallPx) : (AB.tgtSell && AB.tgtSell.wallPx)) || 0, wallVol0: (long ? (AB.tgtBuy && AB.tgtBuy.wallVol0) : (AB.tgtSell && AB.tgtSell.wallVol0)) || 0 };
     AB.close = { side: long ? "sell" : "buy", price: tp, id: 0, state: "NONE", busy: false, at: 0 };
-    AB.state = "inpos";
+    AB.state = "inpos"; AB._closeChasing = false;
     abLog(`✅ РЕАЛ MEXC залило ${long ? "LONG" : "SHORT"} @${pos.avg} — тейк-лимит @${tp.toFixed(dc())} (входные сняты)`, "ok");
   }
   // Управление позицией MEXC: ровно ОДНА reduce-лимитка. Маркет — ТОЛЬКО авария (позиция >3× лота).
@@ -449,28 +599,36 @@
     const C = AB.cfg, t = tk(), ms = Date.now(), pos = mexcPos();
     if (!(pos && pos.vol > 0)) {
       if (AB.state === "inpos") { AB.stats.trades++; abLog("💚 РЕАЛ MEXC позиция закрыта (лимит)", "ok"); }
-      AB.pos = null; AB.close = null; AB.state = "idle"; AB.io = {}; AB._realCd = ms + C.cooldownSec * 1000; return;
+      AB.pos = null; AB.close = null; AB.state = "idle"; AB.io = {}; AB._closeChasing = false; AB._realCd = ms + C.cooldownSec * 1000; return;
     }
     const long = pos.side === 1, cside = long ? RSIDE.CLOSE_LONG : RSIDE.CLOSE_SHORT;
     const cl = AB.close || (AB.close = { side: long ? "sell" : "buy", price: 0, id: 0, state: "NONE", busy: false, at: 0 });
     const usd = pos.vol * cs() * (long ? bb : ba);
-    if (usd > C.sizeUsd * 3) { abLog("🛑 позиция >3× лота — аварийный маркет-выход, стоп бота", "err"); mexcCancelAllReal(); mexcCloseMarket(pos); AB.on = false; syncToggleBtn(); return; }
-    if (ms - AB.pos.t >= C.maxHoldSec * 1000) {                 // тейк не дошёл → шагаем ЛИМИТ к рынку (мейкер)
-      const edge = long ? ba : bb;
-      if (ticksBetween(edge, cl.price) >= 1) { cl.price = snap(edge); cl.state = "NONE"; AB.pos.t = ms; abLog(`тейк не дошёл — лимит закрытия к рынку @${snap(edge).toFixed(dc())}`); }
+    if (usd > lotUsd(long ? bb : ba) * 1.5) { abLog(`🛑 позиция ${Math.round(usd)}$ > 1.5× лота — накопление! аварийно закрываю по рынку`, "err"); if (!reqThrottled(ms)) { markReq(ms); mexcCancelAllReal(); mexcCloseMarket(pos).then(closeRespIdle); } return; }
+    // ВЫХОД ТОЛЬКО ЛИМИТКОЙ (мейкер, 0 комсы). При «пора выходить» переставляем reduce-лимитку на maker-край, НЕ по рынку.
+    const adverse = long ? bb : ba, lossT = long ? (AB.pos.price - adverse) / t : (adverse - AB.pos.price) / t;
+    const held = ms - AB.pos.t;
+    const structural = held > 1200 && wallEaten(AB.pos), advHit = held > C.adverseSec * 1000 && lossT >= 1 && adverseFill(AB.pos);
+    const wantOut = structural || advHit || lossT >= C.stopTicks || held >= C.maxHoldSec * 1000;
+    const tp = long ? snap(AB.pos.price + C.profitTicks * t) : snap(AB.pos.price - C.profitTicks * t);
+    const makerEdge = long ? snap(ba) : snap(bb);             // лонг закрываем ПРОДАЖЕЙ по ask, шорт — ПОКУПКОЙ по bid (мейкер, ловим спред)
+    const target = (C.exitMaker && wantOut) ? makerEdge : tp;
+    if (Math.abs((cl.price || 0) - target) >= t * 0.5) {
+      cl.price = target;
+      if (wantOut && !AB._closeChasing) { AB._closeChasing = true; abLog(`↩ РЕАЛ выход ЛИМИТКОЙ (${structural ? "стену съели" : advHit ? "адверс" : lossT >= C.stopTicks ? "стоп" : "время"}) @${target.toFixed(dc())}`); }
     }
-    // реконсилер ЗАКРЫТИЯ: ровно одна reduce-лимитка на cl.price (переставит, если биржа отклонила)
+    // реконсилер ЗАКРЫТИЯ: ровно одна reduce-лимитка на cl.price (переставит на новую цену, если сместилась/отклонена)
     const orders = (AB._mexcAcct && AB._mexcAcct.orders) || [];
     const closes = orders.filter((o) => o.side === cside);
     const tol = ((C.requoteTicks || 3) + 0.5) * t;
     const good = closes.find((o) => Math.abs(o.price - cl.price) <= tol);
-    if (cl.busy) return;
-    const extra = closes.find((o) => o !== good);
-    if (extra) { cl.busy = true; abPost("/api/mexccancel", { id: extra.id }).then(() => { cl.busy = false; }); return; }
     if (good) { cl.state = "LIVE"; cl.id = good.id; return; }
+    if (cl.busy || reqThrottled(ms) || ms < (cl.retryAt || 0)) return;   // троттл частоты + пауза после отказа
+    const extra = closes.find((o) => o !== good);
+    if (extra) { cl.busy = true; markReq(ms); abPost("/api/mexccancel", { id: extra.id }).then(() => { cl.busy = false; }); return; }
     if (cl.state === "PENDING") { if (ms - cl.at > IO_PENDING_MS) cl.state = "NONE"; else return; }
-    cl.busy = true; cl.state = "PENDING"; cl.at = ms;
-    mexcOrder(cside, ROT.LIMIT, cl.price, pos.vol, pos.id).then((r) => { cl.busy = false; if (!(r && r.ok)) { cl.state = "NONE"; abLog("тейк-лимит отклонён — повтор", "err"); } });
+    cl.busy = true; cl.state = "PENDING"; cl.at = ms; markReq(ms);
+    mexcOrder(cside, ROT.LIMIT, cl.price, pos.vol, pos.id).then((r) => { cl.busy = false; if (!(r && r.ok) && !closeRespIdle(r)) { cl.state = "NONE"; cl.retryAt = Date.now() + 6000; abLog("тейк-лимит отклонён — пауза", "err"); } });
   }
   // MEXC двусторонний — реконсилер обеих сторон + переход в позицию.
   function realStepMexcTwo(bb, ba) {
@@ -566,13 +724,18 @@
     } else if (AB.state === "inpos" && AB.pos) {
       if (!(T.pos && T.pos.vol > 0)) {                                // позиции нет → закрылось
         AB.stats.trades++; abLog("💚 РЕАЛ позиция закрыта", "ok");
-        AB.pos = null; AB.close = null; AB.state = "idle"; AB._realCd = ms + C.cooldownSec * 1000;
+        AB.pos = null; AB.close = null; AB.state = "idle"; AB._closeChasing = false; AB._realCd = ms + C.cooldownSec * 1000;
       } else {
         const usd = T.pos.vol * cs() * (AB.pos.long ? bb : ba);
-        if (usd > C.sizeUsd * 2) { abLog("🛑 РЕАЛ позиция превысила лимит — аварийно закрываю, стоп бота", "err"); cancelAll(); closePos(); AB.on = false; syncToggleBtn(); return; }
+        if (usd > lotUsd(AB.pos.long ? bb : ba) * 2) { abLog("🛑 РЕАЛ позиция превысила лимит — аварийно закрываю по рынку, стоп бота", "err"); cancelAll(); closePos(); AB.on = false; syncToggleBtn(); return; }
         const adverse = AB.pos.long ? bb : ba, lossT = AB.pos.long ? (AB.pos.price - adverse) / t : (adverse - AB.pos.price) / t;
-        if (lossT >= C.stopTicks) { abLog(`РЕАЛ стоп ${C.stopTicks}т — закрываю`, "err"); cancelAll(); closePos(); }
-        else if (ms - AB.pos.t >= C.maxHoldSec * 1000) { abLog(`РЕАЛ время ${C.maxHoldSec}с — закрываю`); cancelAll(); closePos(); }
+        const wantOut = lossT >= C.stopTicks || (ms - AB.pos.t >= C.maxHoldSec * 1000);
+        if (C.exitMaker && wantOut && !AB._closeChasing) {       // ВЫХОД ЛИМИТКОЙ (мейкер): переставить закр.заявку на maker-край, НЕ по рынку
+          const mk = AB.pos.long ? snap(ba) : snap(bb);
+          AB._closeChasing = true; cancelAll();
+          sendOrder(AB.pos.long ? SIDE.CLOSE_LONG : SIDE.CLOSE_SHORT, OT.LIMIT, mk, "AB выход лимит", T.pos.vol, T.pos.id);
+          abLog(`↩ РЕАЛ выход ЛИМИТКОЙ (${lossT >= C.stopTicks ? "стоп" : "время"}) @${mk.toFixed(dc())}`);
+        } else if (!C.exitMaker && wantOut) { abLog(`РЕАЛ выход по рынку`, "err"); cancelAll(); closePos(); }
       }
     }
   }
@@ -582,8 +745,9 @@
     const nowMs = Date.now();
     syncWall();
     if (nowMs - _lastTune > 1200) { _lastTune = nowMs; autoTune(); }   // подбор параметров под монету (и когда выключен — для readout)
+    if (S.bestBid && S.bestAsk && S.depth) { updateSignals(); stepWalls(); }   // движок order-flow (нужен и для readout панели)
     if (AB.on) {
-      if (AB._sym !== S.symbol) { resetRuntime(); AB._sym = S.symbol; }
+      if (AB._sym !== S.symbol) { resetRuntime(); AB._sym = S.symbol; AB._volHist = []; AB._midHist = []; AB.wallTrk = { buy: new Map(), sell: new Map() }; AB._wallsBuy = []; AB._wallsSell = []; AB._wallSeenT = 0; }   // новая монета → сбросить базис объёма и трекинг стен
       const bb = S.bestBid, ba = S.bestAsk, t = tk();
       if (bb && ba && ba > bb) {
         const sprT = Math.round((ba - bb) / t);
@@ -685,6 +849,8 @@
       <div class="ab-row"><label>🧱 Стена ММ, $ <span class="ab-sub">задаёшь ты</span></label><input type="number" id="ab-wallusd" step="50"></div>
       <div class="ab-crow"><button id="ab-wallpull">↧ из стакана</button></div>
       <div class="ab-note" id="ab-wallinfo" style="color:#e6c34a">🧱 стена ММ: —</div>
+      <div class="ab-ct" id="ab-wallmode"><button data-wm="biggest">🏆 Крупнейшая</button><button data-wm="near">📎 Ближняя</button></div>
+      <div class="ab-note" id="ab-fixinfo" style="color:#7fd0ff">💵 ордер: —</div>
       <label class="ab-autochk"><input type="checkbox" id="ab-two"> ⇅ <b>Обе стороны</b> <span class="ab-sub">(лимитки сверху и снизу)</span></label>
       <label class="ab-autochk"><input type="checkbox" id="ab-auto"> 🎯 <b>Авто под монету</b> <span class="ab-sub">(гейт/тейк/стоп)</span></label>
       <div id="ab-autoline" class="ab-strat">—</div>
@@ -778,6 +944,18 @@
       if (src > 0) { AB.cfg.wallMinUsd = src; AB._wallManual = true; if (wu) wu.value = src; saveState(); abLog("стена ММ = $" + Math.round(src) + " (из стакана)"); }
       else abLog("в стакане «Крупный объём USD» не задан порог", "err");
     };
+
+    // readout размера: живая сумма в $ и контрактах (обновляется в render())
+    const fxInfo = w.querySelector("#ab-fixinfo");
+    if (fxInfo) fxInfo.textContent = sizeReadout();
+
+    // режим выбора стены: 🏆 крупнейшая (жирный маркетос, не середина) / 📎 ближняя к спреду
+    const wmBox = w.querySelector("#ab-wallmode");
+    if (wmBox) {
+      const paint = () => wmBox.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.wm === (AB.cfg.wallMode || "biggest")));
+      wmBox.querySelectorAll("button").forEach((b) => b.onclick = () => { AB.cfg.wallMode = b.dataset.wm; AB.tgtBuy = null; AB.tgtSell = null; paint(); saveState(); abLog("режим стены: " + (b.dataset.wm === "biggest" ? "🏆 крупнейшая" : "📎 ближняя")); });
+      paint();
+    }
 
     const twoChk = w.querySelector("#ab-two");
     if (twoChk) { twoChk.checked = AB.twoSided; twoChk.onchange = () => { AB.twoSided = twoChk.checked; if (AB.on) resetRuntime(true); saveState(); abLog(AB.twoSided ? "режим: ⇅ обе стороны" : "режим: одна нога"); }; }
@@ -906,6 +1084,8 @@
         ? `бот подобрал: гейт ${C.gateTicks}т · тейк ${C.profitTicks}т · стоп ${C.stopTicks}т · держ ${C.maxHoldSec}с  ·  🧱 стена ≥ $${Math.round(C.wallMinUsd)} (твоя)`
         : "ручной режим — параметры ниже";
     }
+    const fxi = document.getElementById("ab-fixinfo");           // живой размер ордера в $ и контрактах
+    if (fxi) fxi.textContent = sizeReadout();
 
     const st = document.getElementById("ab-status");
     if (st) {
@@ -914,6 +1094,15 @@
       const [stTxt, stCol] = AB.on ? (stMap[AB.state] || ["—", "#8a95a4"]) : ["ВЫКЛ", "#7a8697"];
       const modeTag = AB.paper ? `<span style="color:#e6c34a">PAPER</span>` : `<span style="color:#ff6b66">🔴 РЕАЛ</span>`;
       let html = `${modeTag} · <span class="st" style="color:${stCol}">${stTxt}</span> · спред ${sprT}т`;
+      if (AB.sig) {                                              // ── readout движка order-flow ──
+        const s = AB.sig, brk = breaking("buy") || breaking("sell"), abs = absorbing("buy") || absorbing("sell");
+        const light = brk ? `<span style="color:#ff6b66">🔴 пробой</span>` : abs ? `<span style="color:#6fcf91">🟢 absorption</span>` : `<span style="color:#7a8697">⚪ тихо</span>`;
+        const wb = (AB._wallsBuy || [])[0], ws = (AB._wallsSell || [])[0];
+        const wtag = (w) => w ? w.cls + (w.iceberg ? "🧊" : "") + " $" + Math.round(w.peakUsd) : "—";
+        html += `<br>${light} · OBI ${s.obi >= 0 ? "+" : ""}${s.obi.toFixed(2)} · Z ${s.volZ.toFixed(1)}`;
+        html += `<br><span style="color:#6fcf91">🧱B ${wtag(wb)}</span> · <span style="color:#ef938f">🧱S ${wtag(ws)}</span>`;
+        if (AB.on && AB._noWall && (AB._blkBuy || AB._blkSell)) html += `<br><span style="color:#c9a34a">⛔ ${AB._blkBuy || AB._blkSell}</span>`;
+      }
       if (!AB.paper && AB.on && AB._realReason) html += `<br><span style="color:#ef938f">⚠ ${AB._realReason}</span>`;
       if (AB.entry) html += `<br>[${AB.entry.kind}] ${AB.entry.side === "buy" ? "BUY" : "SELL"} @${AB.entry.price.toFixed(dc())} → тейк @${AB.entry.tpPrice.toFixed(dc())}`;
       if (AB.twoSided && !AB.pos) {                              // двусторонний: показать обе стоящие лимитки
