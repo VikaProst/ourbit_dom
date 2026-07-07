@@ -779,8 +779,14 @@
     box.querySelectorAll(".mxdrow").forEach((el) => { el.onclick = () => openInCell(el.dataset.s); });
   }
   async function loadDeals() { const p = DPOP; if (!p || p.style.display === "none") return;
-    try { const r = await fetch("/api/mxtop?by=deals&n=60&win=60").then((x) => x.json());
-      if (r && r.ok) renderDeals(r.rows || []); } catch (e) {}
+    // ТОТ ЖЕ источник, что рабочий основной Скринер (/api/screener?ex=mexc): поле trades считается по-настоящему
+    // (через _deal_metrics), включая MEXC-эксклюзивы/сток-токены. Работает без перезапуска сервера.
+    try { const r = await fetch("/api/screener?win=1&n=140&ex=mexc").then((x) => x.json());
+      if (!r || !r.ok) return;
+      const rows = (r.rows || []).filter((x) => (x.trades || 0) > 0)
+        .sort((a, b) => (b.trades || 0) - (a.trades || 0))
+        .slice(0, 60).map((x) => ({ s: x.symbol, tr: x.trades }));
+      renderDeals(rows); } catch (e) {}
   }
   function openDeals(anchor) { const p = ensureDPop();
     if (p.style.display !== "none") { closeDeals(); return; }              // повторный клик = закрыть
