@@ -657,15 +657,22 @@
       return keep;
     });
     if (!lines.some((id) => id !== "dex" && !id.endsWith("fair"))) lines = allLines;   // подстраховка: не гасим все реальные линии
-    // АВТОСКЕЙЛ (робастный): одиночный выброс ВНУТРИ линии не раздувает шкалу (спайк-гард к центру кластера)
-    let hi = -Infinity, lo = Infinity; const cap = med > 0 ? med : 0;
-    for (const id of lines) { const b = BUF[sym + "::" + id]; const special = (id === "dex" || id.endsWith("fair"));
-      for (let i = b.length - 1; i >= 0; i--) { if (b[i][0] < tMin) break; const v = b[i][1];
-        if (!(v > 0)) continue;
-        if (cap > 0 && !special && Math.abs(v - cap) / cap > CLU_HARD) continue;   // точка-выброс (тёзка/битый тик) не двигает hi/lo
-        if (v > hi) hi = v; if (v < lo) lo = v; } }
-    if (!(hi > lo)) { const m = hi > 0 ? hi : (cap > 0 ? cap : 1); hi = m * 1.001; lo = m * 0.999; }
+    // ОЧИЩЕННЫЕ точки каждой линии в окне (Hampel) — ЕДИНЫЙ проход для автоскейла И отрисовки. Спайки убраны ЗДЕСЬ,
+    // поэтому шкала считается по РЕАЛЬНОМУ ходу: большой размах за 4ч/24ч (напр. TAC 10× за окно) попадает в шкалу
+    // и рисуется, а не выкидывается за экран прежним грубым обрезом CLU_HARD (из-за него левая часть длинных окон «пустела»).
+    const maxPts = Math.max(64, (W - padR - padL) * 3) | 0;
+    const LP = {};
+    for (const id of lines) { const b = BUF[sym + "::" + id]; const s0 = idxAtOrAfter(b, tMin);
+      const total = b.length - s0, stride = total > maxPts ? Math.ceil(total / maxPts) : 1;   // прореживаем шаг только на очень широких окнах (24ч посекундно)
+      const idxs = []; for (let i = s0; i < b.length; i += stride) idxs.push(i);
+      if (stride > 1 && idxs.length && idxs[idxs.length - 1] !== b.length - 1) idxs.push(b.length - 1);   // последняя (актуальная) точка — всегда
+      LP[id] = { s0: s0, idxs: idxs, vals: cleanSpikes(idxs.map((i) => b[i][1])) }; }
+    // АВТОСКЕЙЛ по ОЧИЩЕННЫМ точкам (спайки уже убраны, тёзки-линии отфильтрованы выше) — вмещает всю видимую линию
+    let hi = -Infinity, lo = Infinity;
+    for (const id of lines) { const vv = LP[id].vals; for (let k = 0; k < vv.length; k++) { const v = vv[k]; if (v > 0) { if (v > hi) hi = v; if (v < lo) lo = v; } } }
+    if (!(hi > lo)) { const m = hi > 0 ? hi : (med > 0 ? med : 1); hi = m * 1.001; lo = m * 0.999; }
     const pad = (hi - lo) * 0.12; hi += pad; lo -= pad;
+    if (lo < 0) lo = 0;                                                   // огромный размах за окно (напр. 10× за 4ч): нижний паддинг мог уйти в минус — цена не бывает <0
     // СГЛАЖИВАНИЕ ШКАЛЫ: не телепортируем окно при появлении/уходе линии — плавно подъезжаем к цели.
     // Если цель далеко (реальный сильный ход / смена диапазона >2×) — снап, чтобы не отставать.
     const sc = SCALE[sym];
@@ -700,13 +707,8 @@
     const pills = [];
     x.lineJoin = "round"; x.lineCap = "butt";
     for (const id of lines) { const b = BUF[sym + "::" + id], col = COL[id] || "#8a929c";
-      const s0 = idxAtOrAfter(b, tMin);                                 // пропуск к началу окна (не перебирать всю историю → без лагов)
+      const lp0 = LP[id], idxs = lp0.idxs, cleanV = lp0.vals, s0 = lp0.s0;   // те же очищенные точки, что и для автоскейла (без повторного расчёта)
       let lastV = s0 > 0 ? b[s0 - 1][1] : null;
-      const total = b.length - s0, maxPts = Math.max(64, (W - padR - padL) * 3) | 0;
-      const stride = total > maxPts ? Math.ceil(total / maxPts) : 1;    // >3 точек на пиксель не видны (субпиксельные ступеньки) → прореживаем шаг только на очень широких окнах (24ч посекундно). Обычные окна: stride=1
-      const idxs = []; for (let i = s0; i < b.length; i += stride) idxs.push(i);
-      if (stride > 1 && idxs.length && idxs[idxs.length - 1] !== b.length - 1) idxs.push(b.length - 1);   // последняя (актуальная) точка — всегда
-      const cleanV = cleanSpikes(idxs.map((i) => b[i][1]));             // выброс-фильтр: частокол bad-tick'ов убран, реальный тренд сохранён
       const pts = []; for (let k = 0; k < idxs.length; k++) { const v = cleanV[k]; if (v > 0) pts.push([xOf(b[idxs[k]][0]), yOf(v)]); }
       const firstV = cleanV.length ? cleanV[0] : null;
       let anchorV = (lastV != null) ? lastV : firstV;                    // есть реальная точка старше окна → тянем её плоско к левому краю (непрерывно, как THIEF)
