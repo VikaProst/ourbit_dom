@@ -2051,6 +2051,19 @@ def _grid_series(syms, exs, want_fair, want_dex=False):
                 nv = hist[-1][1].get(sym)
                 if nv:
                     m[e] = {"last": nv[3], "turn": round(nv[0]), "rise": round(nv[2] * 100, 2)}
+        if "mexc" in exs:                             # ЖИВОЙ КРАЙ: цена последней СДЕЛКИ MEXC из WS (свежее тикера ~на 1-2с) — точка «секунда в секунду»
+            mpx = _MEXC_PX.get(sym)
+            if mpx and time.time() - mpx[0] <= _MEXC_PX_TTL and mpx[1] > 0:
+                pt = [round(mpx[0], 1), mpx[1]]
+                if isinstance(s.get("mexc"), list) and s["mexc"]:
+                    if s["mexc"][-1][0] < pt[0]:
+                        s["mexc"].append(pt)          # новее последней тикер-точки → дорисовываем свежий край
+                    else:
+                        s["mexc"][-1][1] = mpx[1]     # та же секунда → обновляем цену на WS-свежую (тикер лагает)
+                else:
+                    s["mexc"] = [pt]                  # тикер ещё не прогрет — линия появляется сразу из WS
+                prev = m.get("mexc") or {}
+                m["mexc"] = {"last": mpx[1], "turn": prev.get("turn", 0), "rise": prev.get("rise", 0.0)}
         for e in fair_exs:                            # справедливая (mark) биржи: серия из 7-го поля снапшота
             h = _EX_HIST.get(e)
             if not h:
@@ -2212,6 +2225,9 @@ def _px_recorder():
                                             "dex":  collections.deque(maxlen=_PX_MAXLEN),
                                             "fair": collections.deque(maxlen=_PX_MAXLEN)}
                         mp = mx.get(b)
+                        wspx = _MEXC_PX.get(b + "_USDT")            # живая цена из WS-сделок (мс-свежая) важнее тикера (~1-2с лаг)
+                        if wspx and now - wspx[0] <= _MEXC_PX_TTL and wspx[1] > 0:
+                            mp = wspx[1]
                         if mp:
                             buf["mexc"].append((ts, mp))
                         fp = fair.get(b)
@@ -2752,6 +2768,8 @@ def _deal_counter_ws():
 # MEXC-эксклюзивы (ANSEM/FARTCOIN/сток-токены) отсутствуют на Ourbit → нужен ОТДЕЛЬНЫЙ фид MEXC.
 _MEXC_DEALS: dict = {}
 _MEXC_DEALS_LOCK = threading.Lock()
+_MEXC_PX: dict = {}                     # sym -> (t_recv, price): последняя цена СДЕЛКИ MEXC из WS (свежая до мс) — живой край графика
+_MEXC_PX_TTL = 6.0                      # WS-цена свежее этого → берём её; иначе фолбэк на тикер (тихая монета = редкие сделки = редкие точки)
 MEXC_WS_URL = "wss://contract.mexc.com/edge"
 
 
@@ -2812,6 +2830,8 @@ def _mexc_deal_counter_ws():
                                 p = v = 0.0; side = 1
                             notional = p * v * float(csz.get(sym, 1) or 1)
                             sign = notional if side == 1 else -notional
+                            if p > 0:
+                                _MEXC_PX[sym] = (time.time(), p)   # живая цена MEXC = цена последней сделки (мс-свежая, для края графика)
                             with _MEXC_DEALS_LOCK:
                                 dq = _MEXC_DEALS.get(sym)
                                 if dq is None:
@@ -3262,6 +3282,7 @@ class Handler(BaseHTTPRequestHandler):
                     fpmin = 3
                 self._json({"ok": True, "flow": _flow_for(sym).snapshot(_tick_of(sym), fpmin)})
             elif route == "/api/gridseries":                     # серии цены монеты по многим биржам + справедливая MEXC (панель MEXC↔DEX)
+                _SCR_LAST[0] = time.time()                        # панель открыта → держим MEXC-deals-ws живым (WS-цена = живой край графика). Панель закрылась → poll стоп → через 120с WS засыпает сам
                 syms = [s.strip().upper() for s in (qs.get("symbols") or [""])[0].split(",") if s.strip()][:24]
                 exs = [e.strip().lower() for e in (qs.get("ex") or ["mexc,binance,bybit"])[0].split(",") if e.strip()][:12]
                 want_fair = (qs.get("fair") or ["1"])[0] != "0"
