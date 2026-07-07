@@ -241,7 +241,9 @@
         cell.innerHTML = '<div class="mxempty">выбери монету<input class="mxcsearch" placeholder="напр. GWEI" autocomplete="off"></div>';
       } else {
         cell.innerHTML = '<div class="mxchead"><span class="mxcsym" title="клик — открыть стакан (Ourbit / WEEX / MEXC)">📖 ' + sym.replace("_USDT", "") + '</span>' +
-          '<span class="mxca" title="задать контракт/пару DEX — вставь ссылку Dexscreener или CA (как у друга)">CA</span><span class="mxsp"></span><b class="mxcgap" title="спред между биржами">—</b>' +
+          '<span class="mxca" title="задать контракт/пару DEX — вставь ссылку Dexscreener или CA (как у друга)">CA</span><span class="mxsp"></span>' +
+          '<b class="mxcchg" title="изменение цены за видимое окно графика" style="font:700 12px ui-monospace,monospace"></b>' +
+          '<b class="mxcgap" title="спред между биржами">—</b>' +
           '<button class="mxcedit" title="сменить монету — поиск">✏</button><button class="mxcx" title="убрать ячейку">×</button></div>' +
           '<canvas class="mxccanvas"></canvas><div class="mxcfoot"></div>';
       }
@@ -523,6 +525,7 @@
     if (need.length) {
       const reqSet = {}; for (const e of serFeeds) reqSet[e] = 1;              // тумблеры + пары-биржи всех открытых монет → тянем их серии
       for (const s of need) { const cf = CELLFEEDS[s]; if (cf) for (const e of cf) reqSet[e] = 1; }
+      reqSet["ourbit"] = 1;                                                    // РОДНАЯ биржа всегда в запросе → Ourbit-эксклюзивы (сток-токены MEITUAN/NTAP/GEELY) получают линию, даже если тумблер выкл (рисуется как фолбэк, если нет иной)
       const reqFeeds = Object.keys(reqSet);
       const url = "/api/gridseries?symbols=" + encodeURIComponent(need.join(",")) + "&ex=" + encodeURIComponent(reqFeeds.join(",")) + "&fair=" + (has("mexcfair") ? "1" : "0") + "&dex=" + (has("dex") ? "1" : "0");
       try { const r = await fetch(url).then((x) => x.json());
@@ -599,6 +602,25 @@
     const near = s.filter((v) => Math.abs(v - m) / m <= 0.15); const s2 = near.length ? near : s;
     return s2[Math.floor(s2.length / 2)];
   }
+  // ФИЛЬТР ВЫБРОСОВ (Hampel по скользящему окну): одиночный bad-tick, скачущий от локальной медианы и тут же
+  // возвращающийся (частокол), клампится К локальной медиане — ступенька сохраняется, «палки» уходят. Реальный
+  // резкий памп/обвал = МОНОТОННОЕ движение (много точек в одну сторону) → медиана окна едет вместе → НЕ трогается.
+  const SPIKE_R = 3, SPIKE_FLOOR = 0.10, SPIKE_K = 4;   // окно ±3 точки; порог = max(10% медианы, 4·MAD)
+  function cleanSpikes(vals) {
+    const n = vals.length; if (n < 5) return vals;      // мало точек — не с чем сравнивать
+    const out = vals.slice();
+    for (let i = 0; i < n; i++) {
+      const v = vals[i]; if (!(v > 0)) continue;
+      const a = Math.max(0, i - SPIKE_R), b = Math.min(n - 1, i + SPIKE_R);
+      const w = []; for (let j = a; j <= b; j++) if (vals[j] > 0) w.push(vals[j]);
+      if (w.length < 4) continue;
+      w.sort((p, q) => p - q); const med = w[w.length >> 1]; if (!(med > 0)) continue;
+      const dev = w.map((p) => Math.abs(p - med)).sort((p, q) => p - q); const mad = dev[dev.length >> 1];
+      const thr = Math.max(SPIKE_FLOOR * med, SPIKE_K * mad);
+      if (Math.abs(v - med) > thr) out[i] = med;        // выброс → к локальной медиане (клампим, не рвём ряд)
+    }
+    return out;
+  }
 
   function drawCell(cell, sym) {
     const cv = cell.querySelector(".mxccanvas"); if (!cv) return;
@@ -610,6 +632,9 @@
     // ТУМБЛЕРЫ — ГЛАВНЫЕ: рисуем только включённые биржи. Пара-спред монеты — ТОЛЬКО фолбэк (если монеты нет ни на одной включённой).
     const allLines = CFG.ex.filter((id) => { const b = BUF[sym + "::" + id]; return b && b.length; });
     if (!allLines.length) { const cf = CELLFEEDS[sym]; if (cf) for (const e of cf) { const b = BUF[sym + "::" + e]; if (b && b.length && allLines.indexOf(e) < 0) allLines.push(e); } }
+    if (!allLines.length) {                                                   // монета-эксклюзив (напр. Ourbit-сток MEITUAN/NTAP/GEELY): ни одна ВКЛЮЧЁННАЯ биржа её не отдаёт →
+      const pf = sym + "::"; for (const k in BUF) { if (k.slice(0, pf.length) !== pf) continue; const id = k.slice(pf.length);   // рисуем ЛЮБУЮ доступную линию (минимум — родная биржа), чтобы не висело «сбор данных…»
+        if (id.endsWith("fair")) continue; const b = BUF[k]; if (b && b.length && allLines.indexOf(id) < 0) allLines.push(id); } }
     if (!allLines.length) { x.fillStyle = "#5b6573"; x.font = "11px monospace"; x.fillText("сбор данных…", 10, 20); return; }
     // КЛАСТЕР-ФИЛЬТР (единый, с гистерезисом): CEX-линии одной монеты держатся вместе; линия далеко от
     // кластера = токен-тёзка на другой бирже (напр. gate EDGE 0.072 против mexc 0.30) → не рисуем.
@@ -654,26 +679,40 @@
     const yOf = (p) => H - (p - lo) / rng * (H - 6) - 3;
     const priceAt = (y) => lo + (H - 3 - y) / (H - 6) * rng; cell._priceAt = priceAt;   // для линейки (Y→цена)
     const xOf = (t) => padL + Math.max(0, Math.min(1, (t - tMin) / (tMax - tMin))) * (W - padR - padL);
-    // сетка + оси: слева цена, справа % (спред от низа)
+    // ОПОРНАЯ цена окна = цена ОСНОВНОЙ линии на ЛЕВОМ крае видимого окна (mexc, иначе первый реальный источник).
+    // От неё считаем и правую %-шкалу, и шапочный % → обе цифры бьются и совпадают с реальным ходом на графике.
+    const primL = (lines.indexOf("mexc") >= 0 ? "mexc"
+      : (lines.find((e) => !e.endsWith("fair") && e !== "dex") || lines.find((e) => !e.endsWith("fair")) || lines[0]));
+    let refPx = 0, lastPx = 0;
+    { const pb = BUF[sym + "::" + primL];
+      if (pb && pb.length) { const s0 = idxAtOrAfter(pb, tMin);
+        refPx = s0 > 0 ? pb[s0 - 1][1] : (s0 < pb.length ? pb[s0][1] : 0);   // цена на левом крае окна (тот же якорь, что рисуется слева)
+        lastPx = pb[pb.length - 1][1]; } }
+    const chgPct = (refPx > 0 && lastPx > 0) ? (lastPx / refPx - 1) * 100 : 0;   // реальное изменение за видимое окно
+    // сетка + оси: слева цена, справа — % ИЗМЕНЕНИЯ от начала окна (0% на первой точке, вниз/вверх — реальный ход)
     x.strokeStyle = "rgba(255,255,255,.05)"; x.lineWidth = 1; x.font = "9px ui-monospace,monospace"; x.textAlign = "left";
     for (let i = 0; i <= 4; i++) { const p = lo + rng * (1 - i / 4), yy = 3 + i / 4 * (H - 6);
       x.strokeStyle = "rgba(255,255,255,.05)"; x.beginPath(); x.moveTo(padL, yy); x.lineTo(W - padR, yy); x.stroke();
       x.fillStyle = "#3a4250"; x.fillText(p.toFixed(dec), padL + 2, yy - 2);
-      x.fillStyle = "#5b6573"; x.fillText(((p - lo) / (lo || 1) * 100).toFixed(0) + "%", W - padR + 4, yy + 8); }
+      const pc = refPx > 0 ? (p / refPx - 1) * 100 : (p - lo) / (lo || 1) * 100;   // % от начала окна (fallback — старая формула, если опоры нет)
+      x.fillStyle = "#5b6573"; x.fillText((pc >= 0 ? "+" : "") + pc.toFixed(pc <= -100 || pc >= 100 ? 0 : 1) + "%", W - padR + 4, yy + 8); }
     // линии цены — ступеньками, каждая точка = движение по секундам (как у THIEF друга)
     const pills = [];
     x.lineJoin = "round"; x.lineCap = "butt";
     for (const id of lines) { const b = BUF[sym + "::" + id], col = COL[id] || "#8a929c";
-      const pts = []; const s0 = idxAtOrAfter(b, tMin);                  // пропуск к началу окна (не перебирать всю историю → без лагов)
-      let lastV = s0 > 0 ? b[s0 - 1][1] : null, firstV = null;
+      const s0 = idxAtOrAfter(b, tMin);                                 // пропуск к началу окна (не перебирать всю историю → без лагов)
+      let lastV = s0 > 0 ? b[s0 - 1][1] : null;
       const total = b.length - s0, maxPts = Math.max(64, (W - padR - padL) * 3) | 0;
       const stride = total > maxPts ? Math.ceil(total / maxPts) : 1;    // >3 точек на пиксель не видны (субпиксельные ступеньки) → прореживаем шаг только на очень широких окнах (24ч посекундно). Обычные окна: stride=1
-      for (let i = s0; i < b.length; i += stride) { if (firstV == null) firstV = b[i][1]; pts.push([xOf(b[i][0]), yOf(b[i][1])]); }
-      if (stride > 1 && (b.length - 1 - s0) % stride !== 0 && b.length) { const li = b.length - 1; pts.push([xOf(b[li][0]), yOf(b[li][1])]); }   // последняя (актуальная) точка — всегда
+      const idxs = []; for (let i = s0; i < b.length; i += stride) idxs.push(i);
+      if (stride > 1 && idxs.length && idxs[idxs.length - 1] !== b.length - 1) idxs.push(b.length - 1);   // последняя (актуальная) точка — всегда
+      const cleanV = cleanSpikes(idxs.map((i) => b[i][1]));             // выброс-фильтр: частокол bad-tick'ов убран, реальный тренд сохранён
+      const pts = []; for (let k = 0; k < idxs.length; k++) { const v = cleanV[k]; if (v > 0) pts.push([xOf(b[idxs[k]][0]), yOf(v)]); }
+      const firstV = cleanV.length ? cleanV[0] : null;
       let anchorV = (lastV != null) ? lastV : firstV;                    // есть реальная точка старше окна → тянем её плоско к левому краю (непрерывно, как THIEF)
       if (id === "dex" && lastV == null) anchorV = null;                  // DEX без сид-истории: НЕ рисуем фейковую плоскую полку во всю ширину — начинаем с первой реальной точки
       if (anchorV != null && pts.length) pts.unshift([xOf(tMin), yOf(anchorV)]);
-      const lastPt = b[b.length - 1]; if (lastPt) pills.push({ y: yOf(lastPt[1]), v: lastPt[1], col });
+      const lastCV = cleanV.length ? cleanV[cleanV.length - 1] : 0; if (lastCV > 0) pills.push({ y: yOf(lastCV), v: lastCV, col });   // ярлык цены = очищенная последняя точка (не bad-tick)
       if (!pts.length) continue;
       const isFair = id.endsWith("fair");
       x.strokeStyle = col; x.lineWidth = isFair ? Math.max(0.5, CFG.lw * 0.7) : CFG.lw;
@@ -693,6 +732,8 @@
     for (const id of lines) { if (id.endsWith("fair")) continue; const b = BUF[sym + "::" + id]; if (!b || !b.length) continue; const v = b[b.length - 1][1]; if (v > 0) { if (v < gmn) gmn = v; if (v > gmx) gmx = v; } }
     const vgap = (gmn > 0 && gmx > gmn) ? (gmx - gmn) / gmn * 100 : 0;
     const gapEl = cell.querySelector(".mxcgap"); if (gapEl) gapEl.textContent = vgap.toFixed(2) + "%";   // спред — жёлтой цифрой (наша палитра)
+    const chgEl = cell.querySelector(".mxcchg");   // ИЗМЕНЕНИЕ цены за видимое окно (знаково, зелёный плюс / красный минус) — бьётся с правой %-шкалой
+    if (chgEl) { chgEl.textContent = (chgPct >= 0 ? "+" : "") + chgPct.toFixed(Math.abs(chgPct) >= 10 ? 0 : 2) + "%"; chgEl.style.color = chgPct >= 0 ? "#3fbf7f" : "#ef5350"; }
     const ca = cell.querySelector(".mxca"); if (ca) ca.classList.toggle("on", !!(m.dex));
     // подвал (THIEF): слева — на каких биржах есть монета; справа — D (актив/мин) · L (ликвидн.) · окно
     const foot = cell.querySelector(".mxcfoot"); if (foot) {

@@ -15,6 +15,10 @@ act_keys.json
 bindings.json
 keys_log.txt
 
+# локальный рантайм-кэш посекундной истории графиков (переживает перезапуск) — у каждого свой, не раздаём/не коммитим
+px_history.json
+px_history.json.tmp
+
 # НЕ игнорируем manifest.json и update_url.txt — они нужны для авто-обновления
 order_log.txt
 weex.txt

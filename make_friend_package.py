@@ -14,6 +14,7 @@ SKIP_FILES = {
     # личные ключи и доступы (НИКОГДА не отдавать)
     "ourbit.txt", "weex.txt", "users.txt", "users_log.txt", "license.txt",
     "admin_secret.txt", "keys_log.txt", "act_keys.json", "bindings.json", "proxies.json",
+    "px_history.json", "px_history.json.tmp",   # локальный рантайм-кэш посекундной истории — не раздаём (большой, у каждого свой)
     # адрес автообновления у ВЛАДЕЛЬЦА выключен (чтобы Вика сама не тянула с GitHub) — другу НЕ копируем,
     # вместо него ниже пишем ПРАВИЛЬНЫЙ (иначе у друга автообновление мёртвое, старая версия навсегда)
     "update_url.txt",

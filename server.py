@@ -2008,6 +2008,20 @@ def _dex_seed():
         time.sleep(600)                               # раз в 10 мин добираем новые монеты в топе
 
 
+def _ex_snap_hist(e):
+    """История тикер-снапшотов биржи [(t, {sym: tuple})]. Ourbit — из РОДНОГО _SCREENER-поллера (всегда тёплый,
+    но ourbit НЕ зарегистрирован в _EX_ADAPTERS → в _EX_HIST его нет). Остальные — из _EX_HIST. Кортеж совместим:
+    [0]=оборот, [2]=rise-доля, [3]=last. Без этого Ourbit-эксклюзивы (сток-токены MEITUAN/NTAP/GEELY) не давали линию."""
+    if e == "ourbit":
+        with _SCREENER["lock"]:
+            return list(_SCREENER["hist"])
+    h = _EX_HIST.get(e)
+    if not h:
+        return []
+    with h["lock"]:
+        return list(h["hist"])
+
+
 def _grid_series(syms, exs, want_fair, want_dex=False):
     """Серии цены монеты сразу по нескольким биржам (+справедливая MEXC, +on-chain DEX) для панели MEXC↔DEX.
     Возвращает {sym: {"s": {ex: [[t,last]...]}, "m": {ex: {last,turn,rise}}}}."""
@@ -2027,11 +2041,9 @@ def _grid_series(syms, exs, want_fair, want_dex=False):
         s = {}; m = {}
         base = sym[:-5] if sym.endswith("_USDT") else sym
         for e in exs:
-            h = _EX_HIST.get(e)
-            if not h:
+            hist = _ex_snap_hist(e)                     # ourbit → _SCREENER, прочие → _EX_HIST (единый доступ)
+            if not hist:
                 continue
-            with h["lock"]:
-                hist = list(h["hist"])
             arr = [[round(t, 1), v[3]] for (t, snap) in hist
                    for v in (snap.get(sym),) if v and v[3]]
             if arr:
@@ -2076,6 +2088,11 @@ def _grid_series(syms, exs, want_fair, want_dex=False):
             if da:
                 s["dex"] = da
                 m["dex"] = {"last": da[-1][1], "turn": (_DEX_MAP.get(base) or {}).get("liq", 0), "rise": 0.0}
+        if "ourbit" in exs and "ourbit" not in m:         # Ourbit-сток (тикер lastPrice=0): мгновенная последняя цена из ленты сделок → линия появляется сразу
+            dpx = _DEALS_PX.get(sym)
+            if dpx and time.time() - dpx[0] <= 30 and dpx[1] > 0:
+                s["ourbit"] = [[round(dpx[0], 1), dpx[1]]]
+                m["ourbit"] = {"last": dpx[1], "turn": 0, "rise": 0.0}
         out[sym] = {"s": s, "m": m}
     return out
 
@@ -2171,6 +2188,12 @@ def _px_recorder():
                     dex = dict(_DEX["hist"][-1][1]) if _DEX["hist"] else {}
                 cexsnaps = {}                          # доп. биржи: пишем ТОЛЬКО те, на которые СЕЙЧАС смотрят (тумблер вкл)
                 for f in _PX_CEX:
+                    if f == "ourbit":                  # РОДНАЯ биржа: снапшот из _SCREENER (всегда тёплый) — даёт линию Ourbit-эксклюзивам (сток-токены)
+                        with _SCREENER["lock"]:
+                            snp = _SCREENER["hist"][-1][1] if _SCREENER["hist"] else {}
+                        if snp:
+                            cexsnaps[f] = snp
+                        continue
                     if now - _EX_WANT.get(f, 0) > _EX_TTL:   # биржу никто не открыл → не тратим CPU на её запись (разгружаем GIL)
                         continue
                     h = _EX_HIST.get(f)
@@ -2199,13 +2222,23 @@ def _px_recorder():
                         if dp:
                             buf["dex"].append((ts, dp))
                         sym_u = b + "_USDT"                            # ОСНОВНЫЕ БИРЖИ посекундно (детальная история как у MEXC)
+                        ob_ticker_ok = False
                         for f, snp in cexsnaps.items():
                             v = snp.get(sym_u)
                             if v and v[3]:
+                                if f == "ourbit":
+                                    ob_ticker_ok = True
                                 dq = buf.get(f)
                                 if dq is None:
                                     dq = buf[f] = collections.deque(maxlen=_PX_MAXLEN)
                                 dq.append((ts, v[3]))
+                        if not ob_ticker_ok:                           # Ourbit-сток (тикер lastPrice=0) → цена из ленты сделок = единственный живой источник линии
+                            dpx = _DEALS_PX.get(sym_u)
+                            if dpx and now - dpx[0] <= 30 and dpx[1] > 0:
+                                dq = buf.get("ourbit")
+                                if dq is None:
+                                    dq = buf["ourbit"] = collections.deque(maxlen=_PX_MAXLEN)
+                                dq.append((ts, dpx[1]))
                     if len(_PX) > _PX_MAX_COINS * 2:  # уборка буферов монет, которые давно не смотрят (память ограничена)
                         for b in list(_PX.keys()):
                             last_seen = max(_DEX_WANT.get(b, 0), _PX_WATCH.get(b, 0))
@@ -2230,6 +2263,89 @@ def _px_hist(syms, sec):
                 continue
             out[s] = {k: [[t, p] for (t, p) in dq if t >= cut] for k, dq in buf.items()}   # все записанные биржи (mexc/dex/fair + осн.)
     return out
+
+
+# ── ПЕРСИСТ посекундной истории на диск ──
+# После перезапуска start.bat in-memory буфер _PX обнулялся → свежий график левой частью грубый (только 1-мин свечи),
+# пока рекордер не накопит минуты заново. Теперь периодически сбрасываем _PX на диск и грузим при старте → плотная
+# посекундка сразу. Файл — ЛОКАЛЬНЫЙ рантайм-кэш (как dex_map.json): в .gitignore + не в publish INCLUDE + SKIP пакета.
+_PX_FILE = os.path.join(HERE, "px_history.json")
+_PX_PERSIST_SEC = 3600                                # сохраняем последний ~1ч на линию (кап размера файла; окна ≤1ч плотны сразу после рестарта)
+_PX_PERSIST_EVERY = 25                                # период автосейва, сек (не чаще — не грузим диск/CPU)
+
+
+def _px_snapshot():
+    """Быстрая копия структуры _PX ПОД локом (list(deque) дёшев) — сериализация тяжёлая делается ВНЕ лока (не тормозим рекордер/фиды)."""
+    with _PX_LOCK:
+        return {b: {f: list(dq) for f, dq in buf.items()} for b, buf in _PX.items()}
+
+
+def _px_save():
+    """Сброс посекундной истории на диск (атомарно, вне глобального лока). Кап: последний _PX_PERSIST_SEC на линию + _PX_MAX_COINS монет."""
+    try:
+        snap = _px_snapshot()
+        if not snap:
+            return
+        cut = time.time() - _PX_PERSIST_SEC
+        order = sorted(snap.keys(), key=lambda b: -max(_DEX_WANT.get(b, 0), _PX_WATCH.get(b, 0)))   # приоритет — недавно смотримые монеты
+        out = {}
+        for b in order[:_PX_MAX_COINS]:
+            row = {}
+            for f, pts in snap[b].items():
+                trimmed = [[t, p] for (t, p) in pts if t >= cut and p]
+                if trimmed:
+                    row[f] = trimmed
+            if row:
+                out[b] = row
+        tmp = _PX_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"v": 1, "t": round(time.time(), 1), "px": out}, fh, separators=(",", ":"))
+        os.replace(tmp, _PX_FILE)                     # атомарная замена — читатель при старте не увидит полуфайл
+    except Exception:
+        pass
+
+
+def _px_load():
+    """Загрузка посекундной истории с диска при старте → плотный график сразу после перезапуска (не с нуля)."""
+    try:
+        with open(_PX_FILE, encoding="utf-8") as fh:
+            data = json.load(fh) or {}
+    except Exception:
+        return
+    px = data.get("px") or {}
+    cut = time.time() - _PX_MAXLEN                     # не старше окна буфера (2ч) — древнее бесполезно
+    n_coins = n_pts = 0
+    with _PX_LOCK:
+        for b, row in list(px.items()):
+            if not isinstance(row, dict):
+                continue
+            buf = _PX.get(b)
+            if buf is None:
+                buf = _PX[b] = {"mexc": collections.deque(maxlen=_PX_MAXLEN),
+                                "dex":  collections.deque(maxlen=_PX_MAXLEN),
+                                "fair": collections.deque(maxlen=_PX_MAXLEN)}
+            for f, pts in row.items():
+                dq = buf.get(f)
+                if dq is None:
+                    dq = buf[f] = collections.deque(maxlen=_PX_MAXLEN)
+                for pt in pts:                        # порядок по времени сохранён (сохраняли из отсортированной deque)
+                    try:
+                        t, p = pt[0], pt[1]
+                    except (TypeError, IndexError, KeyError):
+                        continue
+                    if t >= cut and p:
+                        dq.append((t, p)); n_pts += 1
+            n_coins += 1
+    try:
+        print(f"[px] загружена посекундная история: {n_coins} монет, {n_pts} точек")
+    except Exception:
+        pass
+
+
+def _px_persist_loop():
+    while True:
+        time.sleep(_PX_PERSIST_EVERY)
+        _px_save()
 
 
 _PUMP_WIN = 90                                       # окно расчёта пампа/дампа, сек (движение цены «прямо сейчас»)
@@ -2550,6 +2666,8 @@ def _mxtop_deals(n: int = 60, win_sec: float = 60.0) -> list:
 # ─────────── Счётчик СДЕЛОК по многим монетам (отдельный WS) — для скринера «топ по сделкам» ───────────
 _DEALS: dict = {}                      # sym -> deque timestamps(ms)
 _DEALS_LOCK = threading.Lock()
+_DEALS_PX: dict = {}                    # sym -> (t_sec, price) последняя цена сделки Ourbit. Для СТОК-ТОКЕНОВ (MEITUAN/NTAP/GEELY),
+                                        # у которых REST-тикер отдаёт lastPrice=0 → линия строится из ленты сделок (единственный живой источник цены)
 
 
 def _deal_count(sym: str, cutoff_ms: int) -> int:
@@ -2595,6 +2713,18 @@ def _deal_counter_ws():
                         msg = await asyncio.wait_for(ws.recv(), timeout=40)
                         d = json.loads(msg)
                         if d.get("channel") == "push.deal":
+                            _sym0 = d.get("symbol")                   # ЛЁГКИЙ захват последней цены сделки — ТОЛЬКО для ОТКРЫТЫХ в панели монет (дёшево),
+                            if _sym0:                                 # чтобы сток-токены (тикер lastPrice=0) получили живую цену/линию даже когда скринер «холодный»
+                                _b0 = _sym0[:-5] if _sym0.endswith("_USDT") else _sym0
+                                _nw = time.time()
+                                if _nw - _DEX_WANT.get(_b0, 0) <= 60 or _nw - _PX_WATCH.get(_b0, 0) <= 60:
+                                    _d0 = d.get("data"); _d0 = (_d0[0] if isinstance(_d0, list) and _d0 else _d0) or {}
+                                    try:
+                                        _p0 = float(_d0.get("p") or 0)
+                                    except (TypeError, ValueError):
+                                        _p0 = 0.0
+                                    if _p0 > 0:
+                                        _DEALS_PX[_sym0] = (_nw, _p0)
                             if time.time() - _SCR_LAST[0] > 120:      # скринер закрыт → НЕ обрабатываем все сделки (разгрузка GIL, чтобы стакан/лента не фризили)
                                 continue
                             sym = d.get("symbol"); dt = d.get("data") or {}
@@ -3744,7 +3874,9 @@ def main():
     _dex_load_map()
     threading.Thread(target=_dex_poll, daemon=True, name="dex-onchain").start()
     threading.Thread(target=_dex_seed, daemon=True, name="dex-seed").start()      # авто-посев контрактов (лента наполняется сама)
+    _px_load()                                                                       # поднять посекундную историю с диска → график плотный СРАЗУ после рестарта
     threading.Thread(target=_px_recorder, daemon=True, name="px-recorder").start()  # посекундный рекордер цен → плотная история панели
+    threading.Thread(target=_px_persist_loop, daemon=True, name="px-persist").start()  # автосейв посекундной истории на диск (переживает перезапуск start.bat)
     threading.Thread(target=_px_dex_hot, daemon=True, name="px-dex-hot").start()     # частый опрос DEX для открытых монет → плотная DEX-линия
     threading.Thread(target=_autoconnect_ourbit, daemon=True, name="ourbit-autoconnect").start()   # подхватить сохранённый токен Ourbit
     threading.Thread(target=_fee_watchdog, daemon=True, name="fee-watchdog").start()
