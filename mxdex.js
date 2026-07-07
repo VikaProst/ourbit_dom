@@ -294,14 +294,35 @@
     let idx = CFG.cards.indexOf("");                    // есть пустая ячейка? заполнить её
     if (idx >= 0) CFG.cards[idx] = sym; else CFG.cards.push(sym);   // иначе — новая ячейка рядом
     save(); renderGrid(); poll(); }
+  function copyTicker(text) {                              // НАДЁЖНОЕ копирование: execCommand (работает и во встроенном webview/iframe без clipboard-разрешения) + clipboard API
+    let ok = false;
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text; ta.setAttribute("readonly", "");
+      ta.style.cssText = "position:fixed;top:-1000px;left:0;opacity:0";
+      document.body.appendChild(ta); ta.focus(); ta.select();
+      try { ta.setSelectionRange(0, text.length); } catch (e) {}
+      ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+    } catch (e) {}
+    try { if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text); } catch (e) {}
+    copyToast(text);
+    return ok;
+  }
+  function copyToast(text) {                               // видимая плашка «✅ … скопирован» по центру снизу
+    let t = document.getElementById("mxcopytoast");
+    if (!t) { t = document.createElement("div"); t.id = "mxcopytoast"; document.body.appendChild(t); }
+    t.textContent = "✅ " + text + " скопирован"; t.classList.add("show");
+    clearTimeout(copyToast._t); copyToast._t = setTimeout(() => t.classList.remove("show"), 1200);
+  }
   function openInDom(sym) { if (!sym) return; const base = sym.replace("_USDT", "");
-    try { navigator.clipboard.writeText(base); } catch (e) {}
+    copyTicker(base);
     const hasS = typeof S !== "undefined";
     if (typeof openSymbolOn === "function") { if (hasS && S.instr && S.instr[sym]) return openSymbolOn(sym, "ourbit"); if (hasS && S._weexSet && S._weexSet.has(base)) return openSymbolOn(sym, "weex"); }
     if (typeof switchSymbol === "function") switchSymbol(sym); }
   // ── открыть стакан монеты на нужной бирже (терминал умеет Ourbit / WEEX / MEXC) ──
   function openBook(sym, ex) {
-    try { navigator.clipboard.writeText(sym.replace("_USDT", "")); } catch (e) {}
+    copyTicker(sym.replace("_USDT", ""));
     if (ex === "mexc") { if (typeof switchSymbol === "function") switchSymbol(sym); if (typeof setMexcMode === "function") setMexcMode(true); }
     else if (typeof openSymbolOn === "function") openSymbolOn(sym, ex);
   }
@@ -311,7 +332,7 @@
   function openBookMenu(sym, anchor) {
     closeBookMenu(); const m = document.createElement("div"); m.className = "mxbookmenu";
     const base = sym.replace("_USDT", "");
-    try { navigator.clipboard.writeText(base); } catch (e) {}              // КЛИК ПО МОНЕТЕ = сразу копируем тикер (без отдельного пункта)
+    copyTicker(base);                                                       // КЛИК ПО МОНЕТЕ = сразу копируем тикер (надёжно + плашка)
     const exs = [["ourbit", "🐸 Ourbit"], ["weex", "🟠 WEEX"], ["mexc", "🔵 MEXC"]];
     m.innerHTML = '<div class="mxbmh">' + base + ' ✅ скопирован — открыть стакан</div>' +
       exs.map((e) => '<button data-ex="' + e[0] + '">' + e[1] + '</button>').join("");
