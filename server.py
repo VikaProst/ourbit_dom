@@ -351,35 +351,54 @@ def _mx_kline(sym: str, minutes: int) -> list:
 _EX_KL: dict = {}            # (ex,base) -> (points, ts, minutes) кэш свечей бирж
 
 
+def _ex_kline_step(ex: str, minutes: int) -> int:
+    """Шаг свечи (мин) под окно и биржу — чтобы одним запросом покрыть ВСЁ окно слева, не упираясь в лимиты/таймауты биржи.
+    gate 1м-эндпоинт душит запросы при limit≳250 (curl_cffi → таймаут 0 байт), okx 1м жёстко ограничен 300 барами (=5ч впритык):
+    для окон ≳4ч берём крупный бар (5м/15м) — старая часть линии грубее, но идёт ОТ ЛЕВОГО КРАЯ на все 5ч.
+    bybit/binance/bitget держат большие лимиты 1м → мелкий бар дольше."""
+    if ex in ("gate", "okx"):
+        if minutes <= 240:
+            return 1
+        if minutes <= 1200:
+            return 5
+        return 15
+    if minutes <= 960:                                 # bybit/binance/bitget: 1м до ~16ч
+        return 1
+    if minutes <= 4800:
+        return 5
+    return 15
+
+
 def _ex_kline(ex: str, base: str, minutes: int) -> list:
     """Свечи ЛЮБОЙ биржи → [[t_sec, close]] за `minutes` минут (полная история линии биржи, как у MEXC).
-    У каждой биржи свой формат — парсим по месту. Кэш 40с."""
+    У каждой биржи свой формат — парсим по месту. Шаг свечи адаптивен (см. _ex_kline_step). Кэш 40с."""
     key = (ex, base)
     now = time.time()
     c = _EX_KL.get(key)
     if c and now - c[1] < 40 and c[2] == minutes:
         return c[0]
-    lim = min(1000, max(30, minutes + 5))
+    agg = _ex_kline_step(ex, minutes)
+    bars = (minutes + agg - 1) // agg + 5              # число баров, чтобы покрыть ВСЁ окно + запас
     pts = []
     try:
-        if ex == "bybit":
-            u = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={base}USDT&interval=1&limit={min(1000, lim)}"
+        if ex == "bybit":                              # interval в минутах: "1"/"5"/"15"
+            u = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={base}USDT&interval={agg}&limit={min(1000, bars)}"
             arr = (_get(u, timeout=10).json().get("result") or {}).get("list") or []
             pts = [[int(x[0]) // 1000, _ff(x[4])] for x in arr if len(x) >= 5 and _ff(x[4]) > 0]
         elif ex == "binance":
-            u = f"https://fapi.binance.com/fapi/v1/klines?symbol={base}USDT&interval=1m&limit={min(1500, lim)}"
+            u = f"https://fapi.binance.com/fapi/v1/klines?symbol={base}USDT&interval={agg}m&limit={min(1500, bars)}"
             arr = _get(u, timeout=10).json() or []
             pts = [[int(x[0]) // 1000, _ff(x[4])] for x in arr if len(x) >= 5 and _ff(x[4]) > 0]
         elif ex == "gate":
-            u = f"https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract={base}_USDT&interval=1m&limit={min(1999, lim)}"
+            u = f"https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract={base}_USDT&interval={agg}m&limit={min(1999, bars)}"
             arr = _get(u, timeout=12).json() or []
             pts = [[int(x["t"]), _ff(x["c"])] for x in arr if isinstance(x, dict) and _ff(x.get("c")) > 0]
         elif ex == "bitget":
-            u = f"https://api.bitget.com/api/v2/mix/market/candles?symbol={base}USDT&productType=usdt-futures&granularity=1m&limit={min(1000, lim)}"
+            u = f"https://api.bitget.com/api/v2/mix/market/candles?symbol={base}USDT&productType=usdt-futures&granularity={agg}m&limit={min(1000, bars)}"
             arr = _get(u, timeout=10).json().get("data") or []
             pts = [[int(x[0]) // 1000, _ff(x[4])] for x in arr if len(x) >= 5 and _ff(x[4]) > 0]
         elif ex == "okx":
-            u = f"https://www.okx.com/api/v5/market/candles?instId={base}-USDT-SWAP&bar=1m&limit={min(300, lim)}"
+            u = f"https://www.okx.com/api/v5/market/candles?instId={base}-USDT-SWAP&bar={agg}m&limit={min(300, bars)}"
             arr = _get(u, timeout=10).json().get("data") or []
             pts = [[int(x[0]) // 1000, _ff(x[4])] for x in arr if len(x) >= 5 and _ff(x[4]) > 0]
         pts.sort()
@@ -2444,12 +2463,26 @@ def _mxtop_deals(n: int = 60, win_sec: float = 60.0) -> list:
             return _MXTOP_CACHE["rows"][:n]
     _SCR_LAST[0] = now            # держим mexc-deals-ws живым (иначе счётчик сделок засыпает через 120с)
     _ex_want("mexc")             # держим ticker-poll MEXC живым (даёт список монет)
-    try:
-        rows = _screener_top_ex("mexc", win_sec, max(n, 80))
-    except Exception:
-        rows = []
-    out = [{"s": r["symbol"], "tr": int(r.get("trades") or 0)} for r in rows if r.get("trades")]
-    if not out:                          # сделки ещё не накопились / WS-счётчик не поднялся → ФОЛБЭК: топ по обороту (список НЕ пустой сразу)
+    cutoff = int((now - win_sec) * 1000)
+    counts: dict = {}
+    # ОСНОВНОЙ источник — WS-счётчик сделок MEXC (включая MEXC-эксклюзивы: сток-токены/ANSEM/FARTCOIN)
+    with _MEXC_DEALS_LOCK:
+        msyms = list(_MEXC_DEALS.keys())
+    for s in msyms:
+        c = _mexc_deal_metrics(s, cutoff)[0]
+        if c:
+            counts[s] = c
+    # Ourbit-фид — только для монет, которых нет в MEXC-фиде (не задваиваем те же сделки)
+    with _DEALS_LOCK:
+        osyms = list(_DEALS.keys())
+    for s in osyms:
+        if s in counts:
+            continue
+        c = _deal_metrics(s, cutoff)[0]
+        if c:
+            counts[s] = c
+    out = [{"s": s, "tr": c} for s, c in sorted(counts.items(), key=lambda x: -x[1])[:n]]
+    if not out:                          # WS ещё не накопил сделки → ФОЛБЭК: топ по обороту (список НЕ пустой сразу)
         mh = _EX_HIST.get("mexc")
         snap = {}
         if mh:

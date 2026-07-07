@@ -14,6 +14,9 @@ SKIP_FILES = {
     # личные ключи и доступы (НИКОГДА не отдавать)
     "ourbit.txt", "weex.txt", "users.txt", "users_log.txt", "license.txt",
     "admin_secret.txt", "keys_log.txt", "act_keys.json", "bindings.json", "proxies.json",
+    # адрес автообновления у ВЛАДЕЛЬЦА выключен (чтобы Вика сама не тянула с GitHub) — другу НЕ копируем,
+    # вместо него ниже пишем ПРАВИЛЬНЫЙ (иначе у друга автообновление мёртвое, старая версия навсегда)
+    "update_url.txt",
     # владельческие/серверные инструменты
     "make_key.py", "make_user.py", "publish.py", "activation_server.py", "make_friend_package.py",
     "deploy.py", "_setup_login_squadbot.py",
@@ -42,6 +45,9 @@ with zipfile.ZipFile(OUT, "w", zipfile.ZIP_DEFLATED) as z:
             z.write(full, "ourbit_dom/" + rel)
             n += 1
     z.writestr("ourbit_dom/users.txt", friend_users)   # вход друга
+    n += 1
+    z.writestr("ourbit_dom/update_url.txt",             # ПРАВИЛЬНЫЙ адрес автообновления (у владельца выключен, другу нужен рабочий!)
+               "https://raw.githubusercontent.com/VikaProst/ourbit_dom/main\n")
     n += 1
 
 print("=" * 50)
