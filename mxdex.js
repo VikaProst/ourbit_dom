@@ -779,9 +779,10 @@
     box.querySelectorAll(".mxdrow").forEach((el) => { el.onclick = () => openInCell(el.dataset.s); });
   }
   async function loadDeals() { const p = DPOP; if (!p || p.style.display === "none") return;
-    // ТОТ ЖЕ источник, что рабочий основной Скринер (/api/screener?ex=mexc): поле trades считается по-настоящему
-    // (через _deal_metrics), включая MEXC-эксклюзивы/сток-токены. Работает без перезапуска сервера.
-    try { const r = await fetch("/api/screener?win=1&n=140&ex=mexc").then((x) => x.json());
+    // ТОТ ЖЕ источник, что рабочий основной Скринер: поле trades считается по-настоящему (_deal_metrics).
+    // ex=ourbit,mexc — ourbit-путь есть на ЛЮБОЙ версии сервера и всегда тёплый (наполнится без рестарта),
+    // mexc добавляет свои эксклюзивы/сток-токены где доступно. Union по монетам, дедуп на сервере.
+    try { const r = await fetch("/api/screener?win=1&n=200&ex=ourbit,mexc").then((x) => x.json());
       if (!r || !r.ok) return;
       const rows = (r.rows || []).filter((x) => (x.trades || 0) > 0)
         .sort((a, b) => (b.trades || 0) - (a.trades || 0))
