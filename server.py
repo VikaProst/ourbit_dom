@@ -1581,6 +1581,7 @@ _DEX_MAP: dict = {}                              # base -> {chain,pair,addr,liq}
 _DEX_WANT: dict = {}                             # base -> ts последнего запроса из панели
 _DEX_REF: dict = {}                              # base -> референс-цена CEX (отсечка коллизий тикера)
 _DEX_TS: dict = {}                               # base -> ts последнего СВЕЖЕГО опроса цены (гард актуальности алертов)
+_DEX_TRY: dict = {}                              # base -> ts последней ПОПЫТКИ резолва (троттлинг on-demand резолва открытых монет)
 _DEX_MAP_FILE = os.path.join(HERE, "dex_map.json")
 
 
@@ -1628,6 +1629,24 @@ def _dex_fake(liq, vol):
     return liq > 0 and vol < liq * _DEX_MIN_TURN
 
 
+def _dex_cex_ref(base):
+    """Живая last-цена монеты с CEX (для отсечки тёзок при резолве). Берём с самой быстрой доступной биржи,
+    приоритет — MEXC (панель = MEXC↔DEX). Так у ОТКРЫТОЙ монеты ref есть СРАЗУ, даже если сеятель её не трогал."""
+    for ex in ("mexc", "binance", "bybit", "gate", "bitget", "okx"):
+        h = _EX_HIST.get(ex)
+        if not h:
+            continue
+        try:
+            with h["lock"]:
+                snap = h["hist"][-1][1] if h["hist"] else {}
+        except Exception:
+            continue
+        v = snap.get(base + "_USDT")
+        if v and len(v) > 3 and _ff(v[3]) > 0:
+            return _ff(v[3])
+    return 0.0
+
+
 def _dex_resolve(base, ca=None):
     """Резолв пула DEX. ПРИОРИТЕТ — по КОНТРАКТУ токена (как THIEF, иммунитет к коллизии тикера);
     иначе поиск по тикеру со смягчённым гардом (ближе к цене CEX + по ликвидности)."""
@@ -1651,23 +1670,23 @@ def _dex_resolve(base, ca=None):
             pass
     if len(base) <= 2:                           # однобуквенные тикеры по поиску бесполезны — только по CA
         return {"skip": True}
-    ref = _DEX_REF.get(base, 0.0)
+    ref = _DEX_REF.get(base, 0.0) or _dex_cex_ref(base)   # добираем живой CEX-ref сразу (открытая монета имеет ref даже без сеятеля)
     try:
         pairs = _get("https://api.dexscreener.com/latest/dex/search",
                      params={"q": base}, timeout=10).json().get("pairs") or []
         cand = []
         for p in pairs:
-            if ((p.get("baseToken") or {}).get("symbol") or "").upper() != base:
+            if ((p.get("baseToken") or {}).get("symbol") or "").strip().upper() != base:   # .strip(): у части токенов символ с пробелом (напр. 'FARTCOIN ') — иначе валидный пул отбрасывался
                 continue
-            if ((p.get("quoteToken") or {}).get("symbol") or "").upper() not in _DEX_GOODQ:
+            if ((p.get("quoteToken") or {}).get("symbol") or "").strip().upper() not in _DEX_GOODQ:
                 continue
             px = _ff(p.get("priceUsd")); liq = _ff((p.get("liquidity") or {}).get("usd"))
             if px > 0 and liq >= 8000 and _dex_vol(p) >= _DEX_MIN_VOL and not _dex_fake(liq, _dex_vol(p)):
                 cand.append((p, px, liq))         # мимо: слишком тонкие (<$8k), мёртвые (<$3k оборот), и ФЕЙКОВЫЕ (огромная ликв.+нулевой оборот = тёзка)
-        if ref and cand:                          # у настоящей монеты цена DEX близка к бирже; тёзки-коллизии обычно 2x+ мимо
-            cand = [c for c in cand if 0.7 <= c[1] / ref <= 1.43]      # ±~30-43%: НЕ режем памп-дамп (DEX разъезжается на 20-40% — это и есть сигнал), но 2x+ тёзки отсекаем
-        elif not ref:                             # нет цены с биржи (не знаем ref) — не рискуем, только по CA
-            cand = []
+        if ref and cand:                          # есть цена CEX: режем ТОЛЬКО грубые тёзки (>2.5x / <0.4x). Памп-дамп до 2.5x сохраняем (это и есть сигнал спреда, а не тёзка). Порог совпадает с kill-гардом поллера — резолвим ровно то, что поллер не убьёт
+            cand = [c for c in cand if 0.4 <= c[1] / ref <= 2.5]
+        elif not ref and cand:                    # нет цены с биржи — тёзку по цене не отличить: берём пул ТОЛЬКО если он объективно живой и глубокий (крупный правильный пул memecoin'а), живой twin-guard поллера добьёт, если это всё же чужой токен
+            cand = [c for c in cand if c[2] >= 25000 and _dex_vol(c[0]) >= 25000]
         best = max(cand, key=lambda c: _dex_vol(c[0]), default=None)   # пул с МАКС. объёмом 24ч — живая цена (как друг)
         if best:
             bp = best[0]
@@ -1680,6 +1699,28 @@ def _dex_resolve(base, ca=None):
         return m
     except Exception:
         return {}
+
+
+def _dex_ensure(base):
+    """Гарантированный резолв пула для ОТКРЫТОЙ в ячейке монеты — СРАЗУ, не дожидаясь медленного сеятеля.
+    Ставит живой CEX-ref и резолвит; троттлинг 20с, чтобы не долбить Dexscreener на каждом тике панели.
+    Возвращает запись карты (или None). Уважает уже закэшированный пул/skill-kill (twin-guard поллера)."""
+    m = _DEX_MAP.get(base)
+    if isinstance(m, dict) and m.get("pair"):    # пул уже известен — ничего не делаем
+        return m
+    if base in _DEX_HEAVY or len(base) <= 2:     # тяж/однобуквенный — арбитража нет
+        return m
+    now = time.time()
+    if now - _DEX_TRY.get(base, 0) < 20:         # уже пробовали недавно — не спамим резолв
+        return m
+    _DEX_TRY[base] = now
+    r = _dex_cex_ref(base)
+    if r:
+        _DEX_REF[base] = r                       # свежий ref → резолвер отсечёт тёзок и не вернёт пустоту из-за ref=0
+    try:
+        return _dex_resolve(base)
+    except Exception:
+        return m
 
 
 # Dexscreener chainId → GeckoTerminal network slug (для истории свечей DEX-пула)
@@ -1714,6 +1755,8 @@ def _dex_ohlc(base: str, minutes: int) -> list:
     GeckoTerminal пропускает пустые интервалы (в баре без сделок свечи нет), поэтому для тихих пулов
     возвращаем ВСЁ что есть от самого старого доступного бара. Масштаб выправлен к живой цене Dexscreener."""
     m = _DEX_MAP.get(base)
+    if not (isinstance(m, dict) and m.get("pair")):   # пул ещё не резолвился (монету только открыли) → резолвим СЕЙЧАС, не ждём сеятеля
+        m = _dex_ensure(base)
     if not m or m.get("skip") or not m.get("chain") or not m.get("pair"):
         return []
     now = time.time()
@@ -1792,6 +1835,8 @@ def _dex_trades(base: str) -> list:
     """ПОСВОПОВАЯ цена DEX (каждая сделка) → [[t_sec, price_usd]] последних ~200 свопов (GeckoTerminal /trades).
     Даёт детальную линию DEX как у друга: каждое движение = реальный своп в пуле (мельче, чем snapshot Dexscreener)."""
     m = _DEX_MAP.get(base)
+    if not (isinstance(m, dict) and m.get("pair")):   # пул ещё не резолвился → резолвим СЕЙЧАС (детальная DEX-линия появляется за секунды после открытия)
+        m = _dex_ensure(base)
     if not m or m.get("skip") or not m.get("chain") or not m.get("pair"):
         return []
     now = time.time()
@@ -1889,7 +1934,7 @@ def _dex_poll():
             for b in bases:
                 m = _DEX_MAP.get(b)
                 if m is None:
-                    _dex_resolve(b); m = _DEX_MAP.get(b)
+                    _dex_ensure(b); m = _DEX_MAP.get(b)   # резолв с живым CEX-ref + троттлинг (не долбим Dexscreener каждый цикл поллера)
                 if not isinstance(m, dict) or m.get("skip") or not m.get("pair") or not m.get("chain"):
                     continue
                 groups.setdefault(m["chain"], []).append((b, m["pair"].lower()))
@@ -2022,6 +2067,11 @@ def _grid_series(syms, exs, want_fair, want_dex=False):
             if _ref:
                 _DEX_REF[base] = _ref                 # референс CEX для отсечки коллизий при резолве DEX
             _dex_want(base)                          # попросить поллер качать эту монету
+            if not (isinstance(_DEX_MAP.get(base), dict) and _DEX_MAP[base].get("pair")):
+                try:
+                    _dex_ensure(base)                # пул ещё не в карте → резолвим СРАЗУ (DEX-линия появляется сама за секунды, троттлинг 20с внутри)
+                except Exception:
+                    pass
             da = [[round(t, 1), snap[base]] for (t, snap) in dh if snap.get(base)]
             if da:
                 s["dex"] = da
