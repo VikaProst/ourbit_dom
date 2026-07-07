@@ -49,6 +49,7 @@
     <button id="chartbtn" class="gear" title="график">+ График</button>
     <button id="scrbtn" class="gear" title="Скринер — топ по обороту за 30с">📊 Скринер</button>
     <button id="clasbtn" class="gear" title="Классика — формации ТС на Binance 5м: пробои уровней, наклонки, ТВХ">📈 Классика</button>
+    <button id="tribtn" class="gear" title="Треугольник BTC — монитор треугольного арбитража на битке (BTC_USDT·BTC_USDC·USDC_USDT), MEXC">🔺 Треугольник</button>
     <button id="mxbtn" class="gear" title="THIEF SQUAD — наложение цен разных бирж на монету, видно отставание/арбитраж">🕵 THIEF SQUAD</button>
     <button id="watchbtn" class="gear" title="Вочлист — избранные монеты">★ Вочлист</button>
     <button id="finbtn" class="gear" title="Финрез — баланс, позиции, ордера">💼 Финрез</button>
@@ -417,6 +418,21 @@
     .mxso{padding:7px 10px;border-radius:6px;color:#e8ecf2;font:700 12px system-ui,Arial;letter-spacing:.3px;cursor:pointer;white-space:nowrap}
     .mxso:hover{background:rgba(124,196,255,.14);color:#7cc4ff}
     .mxso-empty{padding:10px;color:#5b6573;font-size:12px}
+    /* кнопка «Активные» + попап скринера сделок */
+    #mxdeals{background:#2a2f3a;border:1px solid #3a4150;border-radius:6px;color:#ffb454;font:700 12px system-ui,Arial;padding:5px 10px;cursor:pointer}
+    #mxdeals:hover{background:#343b48;border-color:#4a5262}
+    #mxtrades{background:#0d1117;border:1px solid #2c3444;border-radius:6px;color:#e8ecf2;font:600 12px system-ui,Arial;padding:3px 5px;outline:none;cursor:pointer}
+    .mxdealspop{position:fixed;z-index:92;width:258px;background:#12161d;border:1px solid #2c3444;border-radius:10px;box-shadow:0 16px 46px rgba(0,0,0,.62);padding:7px}
+    .mxdph{display:flex;align-items:center;gap:6px;color:#ffb454;font:700 12px system-ui,Arial;padding:2px 4px 7px}
+    .mxdpu{color:#5b6573;font:500 10px system-ui,Arial;flex:1}
+    .mxdpx{color:#7d8797;cursor:pointer;font-size:13px} .mxdpx:hover{color:#ff6b6b}
+    .mxdplist{max-height:376px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.16) transparent}
+    .mxdplist::-webkit-scrollbar{width:7px} .mxdplist::-webkit-scrollbar-thumb{background:rgba(255,255,255,.13);border-radius:4px}
+    .mxdrow{position:relative;display:flex;align-items:center;gap:8px;padding:6px 9px;border-radius:6px;cursor:pointer;overflow:hidden}
+    .mxdrow:hover{background:rgba(124,196,255,.12)}
+    .mxdbar{position:absolute;left:0;top:0;bottom:0;background:linear-gradient(90deg,rgba(255,180,84,.20),rgba(255,180,84,.05));z-index:0;border-radius:6px}
+    .mxdsym{position:relative;z-index:1;color:#e8ecf2;font:700 12px system-ui,Arial;letter-spacing:.3px;flex:1;white-space:nowrap}
+    .mxdtr{position:relative;z-index:1;color:#ffb454;font:700 12px ui-monospace,monospace}
     /* подвал: чипы D / L / окно (THIEF) */
     .mxfd,.mxfl,.mxftf{font:700 9px ui-monospace,monospace;border-radius:4px;padding:1px 6px}
     .mxfd{color:#0b0e12;background:#3fbf5f} .mxfl{color:#0b0e12;background:#2fb0a6} .mxftf{color:#0b0e12;background:#e6a943}
@@ -452,8 +468,10 @@
     </div>
     <div class="mxbottom">
       <button id="mxaddcard" title="добавить ячейку с графиком">＋ Ячейка</button>
+      <button id="mxdeals" title="топ монет MEXC по числу сделок (активность) — клик по монете открывает её график в сетке">🔥 Активные</button>
       <span class="mxzlbl">окно</span><span class="mxzoom" id="mxzoom"></span>
       <label class="mxthl" title="ОДИН порог: сигнал, когда монета РАЗЪЕХАЛАСЬ ≥ этого % между биржами/DEX И одновременно даёт памп/дамп ≥ этого % за ~90с">🎯 порог (спред+памп) <input id="mxthresh" type="number" min="0.5" step="0.5" value="4"> %</label>
+      <label class="mxthl" title="глубина загрузки истории по СДЕЛКАМ бирж: чем больше, тем детальнее и дальше назад проработана СТАРАЯ часть линий (по каждой сделке)">📊 сделок <select id="mxtrades"><option value="200">200</option><option value="500">500</option><option value="1000">1000</option></select></label>
       <span class="mxsp"></span>
       <span id="mxstat2" class="mxbhint"></span>
     </div>
@@ -537,7 +555,8 @@
   <script class="appjs" type="text/plain" data-src="/chart.js?v=b159"></script>
   <script class="appjs" type="text/plain" data-src="/screener.js?v=b200"></script>
   <script class="appjs" type="text/plain" data-src="/classic.js?v=b218"></script>
-  <script class="appjs" type="text/plain" data-src="/mxdex.js?v=b234"></script>
+  <script class="appjs" type="text/plain" data-src="/tri.js?v=b1"></script>
+  <script class="appjs" type="text/plain" data-src="/mxdex.js?v=b245"></script>
   <div id="watchwin" class="wbwin hidden" style="left:20px;right:auto;top:130px;width:260px;height:380px">
     <div class="wbtitle" id="watchdrag">
       <span class="wbcoin">★ ВОЧЛИСТ</span>

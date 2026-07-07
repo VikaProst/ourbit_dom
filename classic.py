@@ -198,6 +198,20 @@ def _classify_long(bars: list, relv: float) -> str:
     return "ТС№2 Local Long"
 
 
+def _uptrend_pump(bars: list, look: int = 40) -> bool:
+    """Контекст ПАМПА (для «Трендовая памп пробой»): сильный рост + цена держится У ХАЁВ (не откатилась).
+    Ступени: рост→поджатие→рост. Пробой вверх на таком фоне = продолжение пампа."""
+    if len(bars) < look + 5:
+        return False
+    lo = min(b[3] for b in bars[-look:-12])     # низ ДО текущего поджатия
+    hi_recent = max(b[2] for b in bars[-look:])
+    if lo <= 0:
+        return False
+    rise = (hi_recent - lo) / lo                 # насколько выросли
+    near_top = bars[-1][4] > hi_recent * 0.97    # цена у хаёв (поджатие под вершиной, не глубокий откат)
+    return rise > 0.06 and near_top              # ощутимый памп + держимся вверху
+
+
 def _hook_target(bars: list, lvl: float) -> float:
     """ТС4 Hook: после ЗАТЯЖНОГО ПАДЕНИЯ пробой вверх. Цель = 25% амплитуды падения (правило ТС). 0=не крючок."""
     if len(bars) < 60:
@@ -438,16 +452,18 @@ def _detect(sym: str, bars: list, tf: str = "5m") -> list:
             grade, _ = _grade(bars, lvl, natr, L["touches"])   # ХАЙ/УРОВЕНЬ/СЕТАП — нужна консолидация+импульс
             if _GRADE_RANK[grade] < min_rank:                  # слабый (без консолидации) — пропускаем (правило ТС)
                 continue
-            # классификация по 6 ТС: шорт→ТС3; лонг→Hook(ТС4)/Global(ТС1)/Local(ТС2)
+            # классификация по 6 ТС: шорт→ТС3; лонг→ПАМП(ТС1 Трендовая памп пробой)/Hook(ТС4)/Local(ТС2)
             hook_take = _hook_target(bars, lvl) if long else 0.0
-            if long and hook_take:
+            if long and _uptrend_pump(bars):                     # рост + поджатие у хаёв → пробой = продолжение пампа
+                strat, tk, kind = "ТС№1 Global Long", None, "Трендовая памп пробой"
+            elif long and hook_take:
                 strat, tk, kind = "ТС№4 Hook", hook_take, kind + " (крючок)"
             elif long:
                 strat, tk = _classify_long(bars, relv), None
             else:
                 strat, tk = "ТС№3 Short", None
             found.append(_mk_alert(sym, "LONG" if long else "SHORT", kind, lvl, bars,
-                                   res + sup, tf, natr, {"touches": L["touches"]}, grade, relv, strat, tk))
+                                   lvls_take, tf, natr, {"touches": L["touches"]}, grade, relv, strat, tk))
 
     # ── пробой наклонки / ТРЕУГОЛЬНИК (ТС5/6 — по закрытию свечи) ──
     tri = _triangle(lines, bars)                         # есть сходящиеся границы = треугольник
@@ -466,7 +482,7 @@ def _detect(sym: str, bars: list, tf: str = "5m") -> list:
             strat = "ТС№5 Triangle Long" if is_tri else _classify_long(bars, relv)
             kind = "пробой треугольника вверх" if is_tri else "пробой наклонки"
             fb = _false_breakout(bars, v, True) if is_tri else False
-            found.append(_mk_alert(sym, "LONG", kind, v, bars, res + sup, tf, natr,
+            found.append(_mk_alert(sym, "LONG", kind, v, bars, lvls_take, tf, natr,
                                    {"touches": t["touches"], "line": [t["i1"], t["p1"], i_last, v],
                                     "false_out": fb, "btc": _btc_trend()}, gr, relv, strat))
         elif not t["down"] and CFG["shorts"] and c < v * (1 - brk) and pc >= pv * (1 - brk):  # пробой ВНИЗ нижней
@@ -476,7 +492,7 @@ def _detect(sym: str, bars: list, tf: str = "5m") -> list:
             strat = "ТС№6 Triangle Short" if is_tri else "ТС№3 Short"
             kind = "пробой треугольника вниз" if is_tri else "пробой наклонки (дамп)"
             fb = _false_breakout(bars, v, False) if is_tri else False
-            found.append(_mk_alert(sym, "SHORT", kind, v, bars, res + sup, tf, natr,
+            found.append(_mk_alert(sym, "SHORT", kind, v, bars, lvls_take, tf, natr,
                                    {"touches": t["touches"], "line": [t["i1"], t["p1"], i_last, v],
                                     "false_out": fb, "btc": _btc_trend()}, gr, relv, strat))
 
@@ -488,10 +504,10 @@ def _detect(sym: str, bars: list, tf: str = "5m") -> list:
         bot_t = sum(1 for b in box if abs(b[3] - bl) / bl < tol)
         if top_t >= 2 and bot_t >= 2 and _impulse_before(bars, n_cons=44, n_imp=12):  # боковик ТОЛЬКО с приором-импульсом (ошибка №1 ТС)
             if fresh_cross(bh, True):
-                found.append(_mk_alert(sym, "LONG", "боковик. пробой (приор)", bh, bars, res + sup, tf, natr,
+                found.append(_mk_alert(sym, "LONG", "боковик. пробой (приор)", bh, bars, lvls_take, tf, natr,
                                        {"touches": top_t}, "СЕТАП", relv, _classify_long(bars, relv)))
             elif CFG["shorts"] and fresh_cross(bl, False):
-                found.append(_mk_alert(sym, "SHORT", "боковик. пробой вниз (приор)", bl, bars, res + sup, tf, natr,
+                found.append(_mk_alert(sym, "SHORT", "боковик. пробой вниз (приор)", bl, bars, lvls_take, tf, natr,
                                        {"touches": bot_t}, "СЕТАП", relv, "ТС№3 Short"))
 
     # ── закол уровня с возвратом (свип лоя/хая → предвестник, схема «закол лоя 0.3-0.5») ──
@@ -499,13 +515,13 @@ def _detect(sym: str, bars: list, tf: str = "5m") -> list:
     for L in sup:
         lvl = L["p"]
         if last[3] < lvl * (1 - 0.0015) and c > lvl * (1 + 0.0005) and pc >= lvl:
-            found.append(_mk_alert(sym, "LONG", "закол лоя. возврат в ренж", lvl, bars, res + sup, tf, natr,
+            found.append(_mk_alert(sym, "LONG", "закол лоя. возврат в ренж", lvl, bars, lvls_take, tf, natr,
                                    {"touches": L["touches"]}))
     if CFG["shorts"]:
         for L in res:
             lvl = L["p"]
             if last[2] > lvl * (1 + 0.0015) and c < lvl * (1 - 0.0005) and pc <= lvl:
-                found.append(_mk_alert(sym, "SHORT", "закол хая. возврат в ренж", lvl, bars, res + sup, tf, natr,
+                found.append(_mk_alert(sym, "SHORT", "закол хая. возврат в ренж", lvl, bars, lvls_take, tf, natr,
                                        {"touches": L["touches"]}))
     return found
 

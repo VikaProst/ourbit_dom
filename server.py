@@ -58,6 +58,11 @@ try:
     import classic as _classic
 except Exception:
     _classic = None
+# ── ТРЕУГОЛЬНИК BTC: монитор треугольного арбитража на MEXC (tri.py) ──
+try:
+    import tri as _tri
+except Exception:
+    _tri = None
 _raw_get = _SESSION.get
 def _get(url, **kw):
     """GET к бирже через активный прокси (если задан)."""
@@ -385,6 +390,52 @@ def _ex_kline(ex: str, base: str, minutes: int) -> list:
 
 
 _EX_KL_OK = ("bybit", "binance", "gate", "bitget", "okx")   # биржи с подключённой историей свечей
+
+
+_EX_TR: dict = {}            # (ex,base,limit) -> (points, ts) кэш per-trade истории бирж
+_EX_TR_OK = ("bybit", "binance", "gate", "bitget", "okx")   # биржи с подключённой per-trade историей (recent-trades REST)
+_EX_TR_MAX = {"bybit": 1000, "binance": 1000, "gate": 1000, "bitget": 100, "okx": 500}   # потолок сделок за один запрос у биржи
+
+
+def _ex_trades(ex: str, base: str, limit: int = 500) -> list:
+    """Per-trade цена ЛЮБОЙ биржи → [[t_sec, price]] (детализирует СТАРУЮ часть линии биржи по каждой сделке — как _dex_trades для DEX).
+    `limit` = глубина: сколько последних сделок тянуть (чем больше, тем дальше назад детально). У каждой биржи свой формат/потолок. Кэш 8с."""
+    lim = max(50, min(_EX_TR_MAX.get(ex, 500), int(limit or 500)))
+    key = (ex, base, lim)
+    now = time.time()
+    c = _EX_TR.get(key)
+    if c and now - c[1] < 8:                       # сделки прилетают часто, но 8с достаточно (детализация старья, не живой хвост)
+        return c[0]
+    pts = []
+    try:
+        if ex == "bybit":                          # result.list [{price, time(ms), ...}], newest-first
+            u = f"https://api.bybit.com/v5/market/recent-trade?category=linear&symbol={base}USDT&limit={lim}"
+            arr = (_get(u, timeout=10).json().get("result") or {}).get("list") or []
+            pts = [[int(x["time"]) // 1000, _ff(x.get("price"))] for x in arr if _ff(x.get("price")) > 0]
+        elif ex == "binance":                      # aggTrades [{p:price, T:time(ms)}], oldest-first
+            u = f"https://fapi.binance.com/fapi/v1/aggTrades?symbol={base}USDT&limit={lim}"
+            arr = _get(u, timeout=10).json() or []
+            pts = [[int(x["T"]) // 1000, _ff(x.get("p"))] for x in arr if _ff(x.get("p")) > 0]
+        elif ex == "gate":                         # [{price, create_time(сек float)}], newest-first
+            u = f"https://api.gateio.ws/api/v4/futures/usdt/trades?contract={base}_USDT&limit={lim}"
+            arr = _get(u, timeout=12).json() or []
+            pts = [[int(float(x["create_time"])), _ff(x.get("price"))] for x in arr if _ff(x.get("price")) > 0]
+        elif ex == "bitget":                       # data [{price, ts(ms)}], newest-first (потолок 100)
+            u = f"https://api.bitget.com/api/v2/mix/market/fills?symbol={base}USDT&productType=usdt-futures&limit={lim}"
+            arr = _get(u, timeout=10).json().get("data") or []
+            pts = [[int(x["ts"]) // 1000, _ff(x.get("price"))] for x in arr if _ff(x.get("price")) > 0]
+        elif ex == "okx":                          # data [{px, ts(ms)}], newest-first
+            u = f"https://www.okx.com/api/v5/market/trades?instId={base}-USDT-SWAP&limit={lim}"
+            arr = _get(u, timeout=10).json().get("data") or []
+            pts = [[int(x["ts"]) // 1000, _ff(x.get("px"))] for x in arr if _ff(x.get("px")) > 0]
+        pts.sort()                                 # у всех приводим к возрастанию по времени
+    except Exception:
+        pts = []
+    _EX_TR[key] = (pts, now)
+    if len(_EX_TR) > 400:                          # лёгкая прополка кэша (регулятор limit добавляет измерение ключей)
+        for k in [k for k, v in list(_EX_TR.items()) if now - v[1] > 60]:
+            _EX_TR.pop(k, None)
+    return pts
 
 
 def _mexc_deals(sym: str) -> list:
@@ -1442,12 +1493,15 @@ def _set_syms(ex, snap):
 
 
 def _ex_poll(ex: str):
+    slow = ex in ("binance", "binancespot")
+    target = 3.0 if slow else 1.0            # целевой интервал МЕЖДУ снапшотами (а не пауза ПОСЛЕ работы)
     while True:
+        t0 = time.time()
         try:
             if time.time() - _EX_WANT.get(ex, 0) > _EX_TTL:
                 time.sleep(2)                    # никто не смотрит эту биржу — не жжём сеть/CPU
                 continue
-            if ex in ("binance", "binancespot") and time.time() < _BINANCE_BAN[0]:
+            if slow and time.time() < _BINANCE_BAN[0]:
                 time.sleep(3)                    # бан Binance — не долбим (иначе бан не кончится); линии панели замрут
                 continue
             snap = _ex_fetch(ex)
@@ -1456,9 +1510,10 @@ def _ex_poll(ex: str):
                 _EX_HIST[ex]["hist"].append((time.time(), snap))
         except Exception:
             pass
-        # Binance-тикер = вес 40; каждую секунду = ВЕСЬ лимит IP → klines Классики его переполняют.
-        # Опрашиваем Binance раз в 3с (оставляем лимит сканеру), остальные биржи — раз в 1с как было.
-        time.sleep(3.0 if ex in ("binance", "binancespot") else 1.0)
+        # Binance-тикер = вес 40; раз в 3с (оставляем лимит сканеру), остальные — раз в 1с.
+        # КОМПЕНСАЦИЯ: спим на ОСТАТОК до target, вычитая время fetch+parse. Иначе цикл = target+работа
+        # (под GIL-нагрузкой fetch+parse ~0.3-0.6с) → MEXC-снапшот отставал ~1.3-1.6с, график «подтягивался позже».
+        time.sleep(max(0.15, target - (time.time() - t0)))
 
 
 # ─────────── MEXC «справедливая цена» (fairPrice) — отдельный кэш+поллер для панели MEXC↔DEX ───────────
@@ -1476,6 +1531,7 @@ def _mxfair_poll():
     """Тикеры MEXC-контрактов → {sym: (last, fair)} с историей. Опрос только пока панель смотрит."""
     url = "https://contract.mexc.com/api/v1/contract/ticker"
     while True:
+        t0 = time.time()
         try:
             if time.time() - _MXFAIR_WANT[0] > 45:
                 time.sleep(2); continue
@@ -1493,7 +1549,9 @@ def _mxfair_poll():
                 _MXFAIR["hist"].append((time.time(), snap))
         except Exception:
             pass
-        time.sleep(1.0)                              # ~1с — справедливая MEXC тикает так же часто, как линии бирж
+        # Справедливая (mark) MEXC движется медленно (пунктир-справка) + это ВТОРОЙ полный тикер MEXC ~700 символов.
+        # Реже (~1.5с, компенсировано) → снимаем дубль-нагрузку с GIL, чтобы _ex_poll("mexc") держал живую цену ≤1с.
+        time.sleep(max(0.2, 1.5 - (time.time() - t0)))
 
 
 # ─────────── On-chain цена по контракту (Dexscreener, БЕСПЛАТНО без ключа) — фиолетовая DEX-линия [CA] ───────────
@@ -1537,7 +1595,7 @@ _DEX_HEAVY = {"BTC", "ETH", "XRP", "BNB", "SOL", "DOGE", "ADA", "TRX", "LTC", "B
               "WBTC", "WETH", "STETH", "PAXG", "XAUT", "USDC", "USDT", "DAI"}
 
 
-_DEX_MIN_VOL = 20000                             # мин. объём пула 24ч ($): ниже = мёртвый пул, цена застывает → ложный спред
+_DEX_MIN_VOL = 3000                              # мин. объём пула 24ч ($): реальные средние пулы делают $3-10k (POWER-подобные); мёртвые/фейковые ловит _dex_fake отдельно
 _DEX_MIN_TURN = 0.005                            # мин. оборот/ликвидность (0.5%/сут): отсекает ФЕЙКОВЫЕ «глубокие-мёртвые» пулы-тёзки ($1B ликв. + ~0 оборот)
 
 
@@ -1585,8 +1643,8 @@ def _dex_resolve(base, ca=None):
             if ((p.get("quoteToken") or {}).get("symbol") or "").upper() not in _DEX_GOODQ:
                 continue
             px = _ff(p.get("priceUsd")); liq = _ff((p.get("liquidity") or {}).get("usd"))
-            if px > 0 and liq >= 25000 and _dex_vol(p) >= _DEX_MIN_VOL and not _dex_fake(liq, _dex_vol(p)):
-                cand.append((p, px, liq))         # мимо: тонкие (<$25k), мёртвые (<$20k), и ФЕЙКОВЫЕ (огромная ликв.+нулевой оборот = тёзка)
+            if px > 0 and liq >= 8000 and _dex_vol(p) >= _DEX_MIN_VOL and not _dex_fake(liq, _dex_vol(p)):
+                cand.append((p, px, liq))         # мимо: слишком тонкие (<$8k), мёртвые (<$3k оборот), и ФЕЙКОВЫЕ (огромная ликв.+нулевой оборот = тёзка)
         if ref and cand:                          # у настоящей монеты цена DEX близка к бирже; тёзки-коллизии обычно 2x+ мимо
             cand = [c for c in cand if 0.7 <= c[1] / ref <= 1.43]      # ±~30-43%: НЕ режем памп-дамп (DEX разъезжается на 20-40% — это и есть сигнал), но 2x+ тёзки отсекаем
         elif not ref:                             # нет цены с биржи (не знаем ref) — не рискуем, только по CA
@@ -1615,48 +1673,91 @@ _GT_NET = {"ethereum": "eth", "bsc": "bsc", "solana": "solana", "base": "base", 
            "seiv2": "sei-evm", "gnosischain": "xdai", "moonbeam": "moonbeam",
            "worldchain": "world-chain", "taiko": "taiko"}
 _DEX_KL: dict = {}                                # (base) -> (pts, ts) кэш истории DEX-свечей (совместимость)
-_DEX_OHLC: dict = {}                              # (base) -> (bars, ts, minutes) кэш OHLC-свечей DEX
+_DEX_OHLC: dict = {}                              # (base, minutes) -> (bars, ts) кэш OHLC-свечей DEX (окна НЕ затирают друг друга)
+_GT_MAX = 1000                                    # GeckoTerminal ohlcv: максимум 1000 свечей за запрос (limit>1000 → 400)
+_OHLC_TTL = 45                                    # TTL кэша свечей, сек (как раньше)
+_OHLC_MAX_PAGES = 3                               # предохранитель пагинации before_timestamp (обычно хватает 1 страницы)
+
+
+def _dex_ohlc_agg(minutes: int) -> int:
+    """Шаг свечи (мин) под окно: мелкий бар для коротких окон, крупнее для суток — чтобы <=1000 баров покрывали ВСЁ окно."""
+    if minutes <= 600:                            # до 10ч → 1-мин детально (макс 600 баров)
+        return 1
+    if minutes <= 3000:                           # до ~50ч (в т.ч. 24ч=1440) → 5-мин (макс ~600 баров)
+        return 5
+    return 15
 
 
 def _dex_ohlc(base: str, minutes: int) -> list:
     """OHLC-свечи DEX-пула (GeckoTerminal, бесплатно) → [[t_sec, open, high, low, close]] за последние `minutes` минут.
-    Полная история свечей DEX (для свечного графика), масштаб выправлен к живой цене Dexscreener."""
+    ПОЛНАЯ история свечей DEX на всю ширину окна: тянем достаточно баров (и пагинируем before_timestamp),
+    чтобы самый левый бар был не новее (now-minutes) — линия идёт от левого края, а не с середины.
+    GeckoTerminal пропускает пустые интервалы (в баре без сделок свечи нет), поэтому для тихих пулов
+    возвращаем ВСЁ что есть от самого старого доступного бара. Масштаб выправлен к живой цене Dexscreener."""
     m = _DEX_MAP.get(base)
     if not m or m.get("skip") or not m.get("chain") or not m.get("pair"):
         return []
     now = time.time()
-    c = _DEX_OHLC.get(base)
-    if c and now - c[1] < 45 and c[2] == minutes:  # кэш 45с, учитывает окно (иначе 4ч-запрос отдаёт данные вместо 24ч)
+    key = (base, int(minutes))
+    c = _DEX_OHLC.get(key)
+    if c and now - c[1] < _OHLC_TTL:
         return c[0]
     net = _GT_NET.get(m["chain"], m["chain"])
-    bars = []
+    url = f"https://api.geckoterminal.com/api/v2/networks/{net}/pools/{m['pair']}/ohlcv/minute"
+    agg = _dex_ohlc_agg(minutes)
+    want_from = now - minutes * 60                 # левый край окна (сек): тянем историю минимум до сюда
+    first_lim = min(_GT_MAX, minutes // agg + 30)  # 1-я страница ~ под окно + запас; пагинация добьёт при нужде
+    base_gp = {"aggregate": agg, "currency": "usd"}
+    if m.get("addr"):
+        base_gp["token"] = m["addr"]               # цена ИМЕННО нашей монеты (иначе GT берёт базовый токен пула → чужая цена)
+    raw: dict = {}                                 # ts -> [o,h,l,cl] (дедуп между страницами)
+    bars = None
     try:
-        agg = 1 if minutes <= 600 else 5 if minutes <= 3000 else 15   # 24ч (1440м) = 5-мин свечи (минутный лимит 1000 не покроет)
-        lim = min(1000, minutes // agg + 10)
-        url = f"https://api.geckoterminal.com/api/v2/networks/{net}/pools/{m['pair']}/ohlcv/minute"
-        gp = {"aggregate": agg, "limit": lim, "currency": "usd"}
-        if m.get("addr"):
-            gp["token"] = m["addr"]                # цена ИМЕННО нашей монеты (иначе GT берёт базовый токен пула → чужая цена)
-        d = _get(url, params=gp, timeout=10).json()
-        lst = (((d.get("data") or {}).get("attributes") or {}).get("ohlcv_list")) or []
-        if not lst and gp.get("token"):           # GT отверг token-адрес (не-EVM формат, напр. sui «0x…::sui::SUI» → 400) → повтор без token, масштаб выправит якорь ниже
-            gp.pop("token", None)
+        before = None
+        dropped_token = False
+        for page in range(_OHLC_MAX_PAGES):
+            gp = dict(base_gp)
+            gp["limit"] = _GT_MAX if page else first_lim
+            if before:
+                gp["before_timestamp"] = int(before)
             d = _get(url, params=gp, timeout=10).json()
             lst = (((d.get("data") or {}).get("attributes") or {}).get("ohlcv_list")) or []
-        for x in lst:                             # ohlcv_list: [ts, open, high, low, close, volume]
-            if len(x) >= 5:
-                o, h, l, cl = _ff(x[1]), _ff(x[2]), _ff(x[3]), _ff(x[4])
-                if cl > 0 and o > 0:
-                    bars.append([int(x[0]), o, h, l, cl])
-        bars.sort()
-        live = _dex_price(base)                   # привязка к правде Dexscreener: подгоняем ВСЕ o/h/l/c к единому масштабу (тот же якорь, что у сделок _dex_trades и живого хвоста)
+            if not lst and gp.get("token") and not dropped_token:   # GT отверг token-адрес (не-EVM формат, напр. sui «0x…::sui::SUI» → 400) → повтор без token, масштаб выправит якорь ниже
+                base_gp.pop("token", None)
+                dropped_token = True
+                gp.pop("token", None)
+                d = _get(url, params=gp, timeout=10).json()
+                lst = (((d.get("data") or {}).get("attributes") or {}).get("ohlcv_list")) or []
+            if not lst:
+                break
+            got = len(lst)
+            for x in lst:                          # ohlcv_list: [ts, open, high, low, close, volume]
+                if len(x) >= 5:
+                    o, h, l, cl = _ff(x[1]), _ff(x[2]), _ff(x[3]), _ff(x[4])
+                    if cl > 0 and o > 0:
+                        raw[int(x[0])] = [o, h, l, cl]
+            if not raw:
+                break
+            oldest = min(raw)
+            if oldest <= want_from:                # уже покрыли всё окно слева
+                break
+            if got < gp["limit"]:                  # GT отдал меньше запрошенного → история пула исчерпана (тихий/новый пул) → берём всё что есть
+                break
+            before = oldest                        # ещё есть история глубже окна → тянем предыдущую страницу
+        bars = [[t, o, h, l, cl] for t, (o, h, l, cl) in sorted(raw.items())]
+        live = _dex_price(base)                    # привязка к правде Dexscreener: ЕДИНЫЙ множитель на ВСЕ бары всех страниц (тот же якорь, что у сделок _dex_trades и живого хвоста)
         if live > 0 and bars and bars[-1][4] > 0:
             f = live / bars[-1][4]
-            if f < 0.999 or f > 1.001:            # БЕЗ гистерезиса 2%: свечи (старая история) и сделки/хвост (недавнее окно) должны сходиться в одной точке, иначе на стыке ступенька
+            if f < 0.999 or f > 1.001:             # БЕЗ гистерезиса: свечи (старая история) и сделки/хвост (недавнее окно) должны сходиться в одной точке, иначе на стыке ступенька
                 bars = [[t, o * f, h * f, l * f, cl * f] for t, o, h, l, cl in bars]
     except Exception:
+        bars = None
+    if not bars:                                   # ошибка/rate-limit (429): НЕ затираем линию пустотой — отдаём прошлую хорошую и ретраим через ~8с
+        if c and c[0]:
+            _DEX_OHLC[key] = (c[0], now - _OHLC_TTL + 8)
+            return c[0]
         bars = []
-    _DEX_OHLC[base] = (bars, now, minutes)
+    _DEX_OHLC[key] = (bars, now)
     return bars
 
 
@@ -1728,7 +1829,7 @@ def _dex_price(base):
     return 0.0
 
 
-_DEX_POLL_CAP = 400                                  # потолок опроса вотчлиста (БАТЧ Dexscreener 30 пар/запрос → охват втрое больше, ловим LINEA-подобные)
+_DEX_POLL_CAP = 200                                  # потолок опроса вотчлиста (400 перегружал; 200 батчами достаточно, ловим средние монеты, сервер не встаёт)
 _DEX_SLOW_BATCH = 120                                # монет вотчлиста за проход (батчами по 30/сеть) — весь вотчлист освежается за ~3-4 прохода
 _DEX_FRESH_SEC = 180                                 # старше — цена DEX протухла. 180с: пул торгуется реже раз/90с, но цена валидна (не выбрасываем реальные спреды)
 _dex_slow_off = 0                                    # смещение ротации медленного ряда
@@ -1976,6 +2077,7 @@ def _px_dex_hot():
 def _px_recorder():
     """Каждую ~1с сэмплит MEXC last + DEX + справедливую для СМОТРИМЫХ монет в кольцевые буферы — плотная посекундная история."""
     while True:
+        _t0 = time.time()
         try:
             now = time.time()
             watched = set()
@@ -1998,8 +2100,10 @@ def _px_recorder():
                 fair = {s.replace("_USDT", ""): v[1] for s, v in fs.items() if v and v[1]}
                 with _DEX["lock"]:                    # on-chain цена DEX по base
                     dex = dict(_DEX["hist"][-1][1]) if _DEX["hist"] else {}
-                cexsnaps = {}                          # доп. биржи: последний снапшот (только прогретые, у кого есть данные)
+                cexsnaps = {}                          # доп. биржи: пишем ТОЛЬКО те, на которые СЕЙЧАС смотрят (тумблер вкл)
                 for f in _PX_CEX:
+                    if now - _EX_WANT.get(f, 0) > _EX_TTL:   # биржу никто не открыл → не тратим CPU на её запись (разгружаем GIL)
+                        continue
                     h = _EX_HIST.get(f)
                     if not h:
                         continue
@@ -2040,7 +2144,7 @@ def _px_recorder():
                                 _PX.pop(b, None)
         except Exception:
             pass
-        time.sleep(1)
+        time.sleep(max(0.2, 1.0 - (time.time() - _t0)))   # компенсация: плотная история ~1с (а не 1с+работа)
 
 
 def _px_hist(syms, sec):
@@ -2130,7 +2234,12 @@ def _gap_top(exs, n, minturn, maxgap=400.0):
         gap = (mx - mn) / mn * 100
         if gap > maxgap:                             # абсурдный гэп = разные токены под одним тикером / битая цена
             continue
-        pump = _pump_pct(ref_e, sym) if ref_e else 0.0   # памп/дамп «прямо сейчас» (движение ref-биржи за ~90с)
+        pump = 0.0                                       # памп/дамп по ЛЮБОЙ из бирж расхождения (ref/дешёвая/дорогая), не только самой оборотистой:
+        for _pe in (ref_e, lo_e, hi_e):                  # напр. ALLO пампит на Binance, а MEXC лагает → ловим движение Binance, а не 0 по MEXC
+            if _pe and _pe != "dex":
+                _pp = _pump_pct(_pe, sym)
+                if abs(_pp) > abs(pump):
+                    pump = _pp
         rows.append({"symbol": sym, "gap": round(gap, 3), "turn": round(turn),
                      "rise": round(rise * 100, 2), "pump": round(pump, 2), "ex": exset, "loEx": lo_e, "hiEx": hi_e})
     rows.sort(key=lambda r: max(r["gap"], abs(r["pump"])), reverse=True)   # наверх: и сильное расхождение, И сильный памп/дамп
@@ -2320,6 +2429,38 @@ def _screener_top_ex(ex: str, win: float = 30.0, n: int = 40) -> list:
             r["act"] = round(100 * r["amt"] / mam)
         top = sorted(rows, key=lambda r: (r["trades"], r["amt"]), reverse=True)[:n]   # сортировка по сделкам (все монеты известны)
     return top
+
+
+_MXTOP_CACHE = {"ts": 0.0, "rows": []}       # кэш «топ по сделкам» для скринера THIEF SQUAD (пересчёт раз в 3с)
+_MXTOP_LOCK = threading.Lock()
+
+
+def _mxtop_deals(n: int = 60, win_sec: float = 60.0) -> list:
+    """Топ монет MEXC по ЧИСЛУ СДЕЛОК за окно (активность) → [{"s":sym,"tr":count}] по убыванию.
+    ПЕРЕИСПОЛЬЗУЕТ WS-счётчик сделок скринера (_screener_top_ex mexc). Кэш 3с (не считаем каждый запрос)."""
+    now = time.time()
+    with _MXTOP_LOCK:
+        if now - _MXTOP_CACHE["ts"] < 3 and _MXTOP_CACHE["rows"]:
+            return _MXTOP_CACHE["rows"][:n]
+    _SCR_LAST[0] = now            # держим mexc-deals-ws живым (иначе счётчик сделок засыпает через 120с)
+    _ex_want("mexc")             # держим ticker-poll MEXC живым (даёт список монет)
+    try:
+        rows = _screener_top_ex("mexc", win_sec, max(n, 80))
+    except Exception:
+        rows = []
+    out = [{"s": r["symbol"], "tr": int(r.get("trades") or 0)} for r in rows if r.get("trades")]
+    if not out:                          # сделки ещё не накопились / WS-счётчик не поднялся → ФОЛБЭК: топ по обороту (список НЕ пустой сразу)
+        mh = _EX_HIST.get("mexc")
+        snap = {}
+        if mh:
+            with mh["lock"]:
+                snap = mh["hist"][-1][1] if mh["hist"] else {}
+        top = sorted(((s, v[0]) for s, v in snap.items() if v and v[0] > 0), key=lambda x: -x[1])[:n]
+        out = [{"s": s, "tr": 0, "turn": round(t)} for s, t in top]   # tr=0 + turn → клиент покажет оборот, пометит «по обороту»
+    with _MXTOP_LOCK:
+        _MXTOP_CACHE["ts"] = now
+        _MXTOP_CACHE["rows"] = out
+    return out[:n]
 
 
 
@@ -2713,6 +2854,7 @@ _STATIC = {"/app.js": "application/javascript; charset=utf-8",
            "/trade.js": "application/javascript; charset=utf-8",
            "/chart.js": "application/javascript; charset=utf-8",
            "/classic.js": "application/javascript; charset=utf-8",
+           "/tri.js": "application/javascript; charset=utf-8",
            "/screener.js": "application/javascript; charset=utf-8",
            "/mxdex.js": "application/javascript; charset=utf-8",
            "/tape.js": "application/javascript; charset=utf-8",
@@ -2922,6 +3064,10 @@ class Handler(BaseHTTPRequestHandler):
                 except (TypeError, ValueError):
                     n, minturn, maxgap = 20, 50000.0, 400.0
                 self._json({"ok": True, "rows": _gap_top(exs, n, minturn, maxgap)})
+            elif route == "/api/tri/state":                      # ТРЕУГОЛЬНИК: живое состояние монитора BTC-арбитража
+                if not _tri:
+                    self._json({"ok": False, "error": "модуль tri не загружен"}); return
+                self._json(_tri.state())
             elif route == "/api/classic/alerts":                 # КЛАССИКА: свежие алерты формаций (since=последний виденный id)
                 if not _classic:
                     self._json({"ok": False, "error": "модуль classic не загружен"}); return
@@ -2998,6 +3144,28 @@ class Handler(BaseHTTPRequestHandler):
                     b = s.replace("_USDT", "")
                     out[s] = {e: _ex_kline(e, b, minutes) for e in exs}
                 self._json({"ok": True, "kline": out})
+            elif route == "/api/extrades":                       # per-trade история ДРУГИХ бирж (детализация СТАРОЙ линии по сделкам) → {sym:{ex:[[t,c]]}}
+                syms = [s.strip().upper() for s in (qs.get("symbols") or [""])[0].split(",") if s.strip()][:12]
+                exs = [e.strip().lower() for e in (qs.get("exs") or [""])[0].split(",") if e.strip() in _EX_TR_OK][:6]
+                try:
+                    limit = max(50, min(1000, int((qs.get("limit") or ["500"])[0])))   # регулятор глубины загрузки по сделкам
+                except (TypeError, ValueError):
+                    limit = 500
+                out = {}
+                for s in syms:
+                    b = s.replace("_USDT", "")
+                    out[s] = {e: _ex_trades(e, b, limit) for e in exs}
+                self._json({"ok": True, "trades": out})
+            elif route == "/api/mxtop":                          # топ монет MEXC по числу сделок (активность) — скринер сделок в THIEF SQUAD
+                try:
+                    n = max(5, min(120, int((qs.get("n") or ["60"])[0])))
+                except (TypeError, ValueError):
+                    n = 60
+                try:
+                    win = max(10.0, min(300.0, float((qs.get("win") or ["60"])[0])))
+                except (TypeError, ValueError):
+                    win = 60.0
+                self._json({"ok": True, "rows": _mxtop_deals(n, win)})
             elif route == "/api/pxhist":                         # ПЛОТНАЯ посекундная история цен (MEXC/DEX/fair) для панели
                 syms = [s.strip().upper() for s in (qs.get("symbols") or [""])[0].split(",") if s.strip()][:12]
                 try:
@@ -3518,6 +3686,8 @@ def main():
             return r.json()
         _classic.set_fetcher(_classic_fetch)
         threading.Thread(target=_classic.scanner, daemon=True, name="classic-scanner").start()
+    if _tri:
+        threading.Thread(target=_tri.poller, daemon=True, name="tri-poller").start()
     _start_ws()
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"Ourbit DOM (MetaScalp-style) запущен:  http://localhost:{PORT}")

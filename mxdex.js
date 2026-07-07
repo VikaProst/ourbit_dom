@@ -10,6 +10,12 @@
   const g = (id) => document.getElementById(id);
   const LS = "mxdex.cfg.v4";                          // v4: старт MEXC↔DEX (сброс старых настроек бирж)
   const POLL_MS = 1000;                               // как часто тянем свежие цены
+  const HOT_MAX = 8;                                  // сколько ОТКРЫТЫХ ячеек кормим плотными сидами каждый тик (их мало → максимум детали; потолок от «раздувания» при огромной сетке)
+  // Кластер-фильтр CEX-линий (анти-коллизия тикеров + анти-мерцание): цены ОДНОЙ монеты на разных биржах
+  // держатся вместе (<~1-2%, арбитраж их поджимает). Линия далеко от кластера = ДРУГОЙ токен-тёзка
+  // (напр. gate EDGE ≠ mexc EDGE, сидит на 0.072 против 0.30). Гистерезис IN<OUT = линия не мигает у границы.
+  const CLU_IN = 0.05, CLU_OUT = 0.09, CLU_HARD = 0.5;   // показать <5%, скрыть >9%, жёсткий обрез (тёзка) >50% от медианы
+  const SCALE_K = 1;                                  // 1 = ШКАЛА СНАПИТСЯ к данным без дрейфа (Вика: график не должен постоянно двигаться при зуме). Мерцание линий гасит гистерезис-фильтр
   const THRESH = [2.5, 5, 8, 10, 15, 20, 30, 50];     // пороги спред-колла, %
   const RE_ALERT_MS = 10 * 60 * 1000;                 // спред ДЕРЖИТСЯ → повторный сигнал не чаще раза в 10 мин
   const GONE_RESET_MS = 3 * 60 * 1000;                // спред ПРОПАЛ на 3+ мин → сброс (новое появление = новый разрыв = сигнал)
@@ -23,6 +29,7 @@
     { lbl: "GATE", c: "#e6446e", f: "gate", s: "gatespot", fx: "gatefair" },     // малиновый
     { lbl: "BITGET", c: "#17becf", f: "bitget", s: "bitgetspot", fx: "bitgetfair" }, // циан
     { lbl: "OKX", c: "#9aa7b4", f: "okx", s: "okxspot" },                        // серый
+    { lbl: "KUCOIN", c: "#0be881", f: "kucoin" },                                // бирюзово-зелёный (без спота/fair — kucoin их не отдаёт)
     { lbl: "BINGX", c: "#1f77ff", f: "bingx" },                                  // синий
     { lbl: "OURBIT", c: "#e377c2", f: "ourbit" },                                // розовый
     { lbl: "ASTER", c: "#5a4fcf", f: "asterdex" },                               // индиго
@@ -33,12 +40,12 @@
     { lbl: "DEX·CA", c: "#a64dff", id: "dex", title: "on-chain цена по контракту (Dexscreener)" },   // фиолетовый (фикс)
   ];
   const COL = { mexc: "#16c784", binance: "#f5b800", binancespot: "#f5d24b", bybit: "#ff7f0e",
-    gate: "#e6446e", bitget: "#17becf", bingx: "#1f77ff", okx: "#9aa7b4", ourbit: "#e377c2",
+    gate: "#e6446e", bitget: "#17becf", bingx: "#1f77ff", okx: "#9aa7b4", kucoin: "#0be881", ourbit: "#e377c2",
     asterdex: "#5a4fcf", lighter: "#8c564b", hyperliquid: "#bcbd22", mexcfair: "#e6c84a", dex: "#a64dff",
     mexcspot: "#6fe0a8", bybitspot: "#ffb066", gatespot: "#f08ba6", bitgetspot: "#7fe0ea", okxspot: "#cfd6de",
     bybitfair: "#ff7f0e", gatefair: "#e6446e", bitgetfair: "#17becf" };   // справедливые — цвет биржи, рисуются ПУНКТИРОМ
   const LBL = { mexc: "MEXC·F", binance: "BINANCE·F", binancespot: "BINANCE·S", bybit: "BYBIT·F",
-    gate: "GATE·F", bitget: "BITGET·F", bingx: "BINGX", okx: "OKX·F", ourbit: "OURBIT",
+    gate: "GATE·F", bitget: "BITGET·F", bingx: "BINGX", okx: "OKX·F", kucoin: "KUCOIN·F", ourbit: "OURBIT",
     asterdex: "ASTER", lighter: "LIGHTER", hyperliquid: "HL", mexcfair: "FAIR", dex: "DEX·CA",
     mexcspot: "MEXC·S", bybitspot: "BYBIT·S", gatespot: "GATE·S", bitgetspot: "BITGET·S", okxspot: "OKX·S",
     bybitfair: "BYBIT·Ф", gatefair: "GATE·Ф", bitgetfair: "BITGET·Ф" };
@@ -46,11 +53,17 @@
   const DEF = { ex: ["mexc", "dex", "mexcfair"], sound: true,           // старт: MEXC ↔ DEX (арбитраж on-chain vs биржа)
     cards: ["VANRY_USDT", "GWEI_USDT", "OPENAI_USDT", "ANTHROPIC_USDT"],
     windowSec: 120, thresh: 4, pinned: [], minturn: 3000, maxgap: 300,   // thresh — ЕДИНЫЙ порог: спред ≥ % И памп/дамп ≥ % одновременно
+    mxtrades: 500,                                                        // глубина загрузки истории по сделкам (детализация СТАРОЙ части линий бирж)
     cols: 3, cellH: 210, lw: 0.8, feedW: 198 };
   const isSpot = (e) => !!e && e.endsWith("spot");                     // спотовые фиды — Вика их НЕ торгует (в уведомления не берём)
 
   let CFG = load();
   const BUF = {};                    // "sym::ex" -> [[t,price]] клиентский буфер (плавная живая линия)
+  const SEEDSIG = {};                // "sym::ex" -> сигнатура последнего сида (len:t0:t1:last) → сервер вернул то же окно = НЕ пересобираем массив
+  let DEEPKQ = [];                   // очередь монет на тяжёлый сид свечей (kline) — раскидываем по тикам, не грузим 5 фетчей разом при открытии
+  const SEEDBUSY = {};               // feed-тип -> идёт ли сейчас медленный сид-фетч (px/ex/dex): НЕ наслаиваем запросы при холодном серверном кэше → детально, но без зависания
+  const VIS = {};                    // "sym::ex" -> bool: показывается ли линия сейчас (гистерезис кластер-фильтра, чтобы не мигала)
+  const SCALE = {};                  // sym -> {hi,lo} сглаженная шкала графика (не телепортируем окно при появлении/уходе линии)
   const ACTIVE = {};                 // sym -> {bucket} — трекинг пробоя порога (для дедупа алертов)
   const LOG_LS = "mxdex.log.v1", LOG_MAX = 60;
   let FEEDLOG = loadLog();            // ИСТОРИЯ спред-коллов (копится, не сбрасывается, хранится в localStorage)
@@ -135,7 +148,7 @@
     const st = g("mxstat");
     try {
       s.classList.remove("hidden"); s.style.display = "";
-      const hh = s.querySelector(".mxseth"); if (hh && hh.childNodes[0]) hh.childNodes[0].nodeValue = "Настройки сетки · v234  ";   // видно версию при открытии
+      const hh = s.querySelector(".mxseth"); if (hh && hh.childNodes[0]) hh.childNodes[0].nodeValue = "Настройки сетки · v245  ";   // видно версию при открытии
       s.onmousedown = (e) => e.stopPropagation();     // не отдавать mousedown драгу окна — иначе клики внутри «съедаются»
       const xb = g("mxset-x"); if (xb) { xb.onmousedown = (e) => { e.preventDefault(); e.stopPropagation(); closeSettings(); }; xb.onclick = closeSettings; }
       document.addEventListener("keydown", onSetKey);
@@ -331,20 +344,26 @@
       if (rec.s && rec.s[id] && rec.s[id].length) {                       // доливаем историю сервера по мере прогрева фида (не только при пустом буфере)
         const srv = rec.s[id];
         if (buf.length === 0) { for (const p of srv) buf.push([p[0], p[1]]); }
-        else { const firstT = buf[0][0], older = srv.filter((p) => p[0] < firstT - 0.5);
+        else if (srv[0][0] < buf[0][0] - 0.5) {                           // есть ли вообще точки СТАРШЕ начала буфера — иначе не тратим O(n) filter каждую секунду
+          const firstT = buf[0][0], older = srv.filter((p) => p[0] < firstT - 0.5);
           for (let i = older.length - 1; i >= 0; i--) buf.unshift([older[i][0], older[i][1]]); }
       }
       const v = latestOf(rec, id);
       if (v) { const lp = buf[buf.length - 1]; if (!lp || now - lp[0] >= 0.8) buf.push([now, v]); else lp[1] = v; }   // КАЖДУЮ секунду — точка (каждое движение)
-      const cutoff = now - Math.max(2400, winOf(sym) + 600);              // держим на всё окно ячейки (до 24ч)
-      while (buf.length && buf[0][0] < cutoff) buf.shift();
+      if (_pc % 4 === 0) {                                                // тримминг старья — раз в ~4с (не каждую секунду по всем биржам) и одним splice вместо цепочки shift (каждый shift = O(n))
+        const cutoff = now - Math.max(2400, winOf(sym) + 600);           // держим на всё окно ячейки (до 24ч)
+        let cut = 0; while (cut < buf.length && buf[cut][0] < cutoff) cut++;
+        if (cut > 0) buf.splice(0, cut);
+      }
       if (buf.length > 30000) buf.splice(0, buf.length - 30000);          // хватит на ~8ч посекундно
     }
   }
   function seedBuf(key, pts) {                                            // префикс истории свечами в буфер линии (только точки старше имеющихся)
+    if (!pts || !pts.length) return;
     const buf = BUF[key] || (BUF[key] = []); const now = nowS();
     const firstLive = buf.length ? buf[0][0] : now;
-    const hist = pts.filter((p) => p[0] < firstLive - 1 && p[1] > 0);
+    if (pts[0][0] >= firstLive - 1) return;                              // весь kline новее уже имеющегося начала → нечего префиксить (частый случай после первого сида) — не тратим O(n) filter
+    const hist = []; for (const p of pts) if (p[0] < firstLive - 1 && p[1] > 0) hist.push(p);
     if (hist.length) { for (let i = hist.length - 1; i >= 0; i--) buf.unshift([hist[i][0], hist[i][1]]); if (buf.length > 14000) buf.splice(0, buf.length - 14000); }
   }
   // подгрузка истории MEXC + СПРАВЕДЛИВОЙ свечами (детально, до 24ч) — «каждое движение чётко»
@@ -371,13 +390,15 @@
   }
   // ПОСВОПОВАЯ линия DEX: каждая сделка в пуле = точка (GeckoTerminal /trades). Детально, как у друга. Владеет недавним окном DEX.
   async function dexTradesSeed(syms) {
-    if (!has("dex")) return;
+    if (!has("dex") || !syms || !syms.length || SEEDBUSY.dex) return;   // in-flight-гард: не наслаиваем свопы (серверный кэш 6с) — детально, без затыка
+    SEEDBUSY.dex = true;
     try { const r = await fetch("/api/dextrades?symbols=" + encodeURIComponent(syms.join(","))).then((x) => x.json());
       if (!r || !r.ok) return;
       for (const sym in (r.trades || {})) { const pts = r.trades[sym]; if (pts && pts.length) pxSeed(sym + "::dex", pts); }
-    } catch (e) {}
+    } catch (e) {} finally { SEEDBUSY.dex = false; }
   }
   const KLINE_EX = ["bybit", "binance", "gate", "bitget", "okx"];         // биржи с подключённой историей свечей (полная линия слева)
+  const TRADES_EX = ["bybit", "binance", "gate", "bitget", "okx"];        // биржи с per-trade историей (детализация старой части линии по сделкам)
   // ПОЛНАЯ ИСТОРИЯ ДРУГИХ БИРЖ: свечи каждой биржи → префикс к линии (как у MEXC), чтобы график был не с середины
   async function exKlineSeed(syms) {
     const exset = {};                                                    // какие биржи показываем (тумблеры + пары монет) и умеем их свечи
@@ -392,32 +413,56 @@
       }
     } catch (e) {}
   }
+  // ПОСДЕЛОЧНАЯ ДЕТАЛИЗАЦИЯ СТАРОЙ линии бирж: каждая сделка биржи = точка (recent-trade REST). Глубина = CFG.mxtrades.
+  // Владеет окном [t0..t1] последних N сделок (детальнее рекордера и глубже назад) — как dexTradesSeed для DEX. seedBuf-свечи остаются fallback ещё старше.
+  async function exTradesSeed(syms) {
+    const exset = {};                                                    // какие биржи показываем (тумблеры + пары монет) и умеем их сделки
+    for (const e of CFG.ex) if (TRADES_EX.indexOf(e) >= 0) exset[e] = 1;
+    for (const s of syms) { const cf = CELLFEEDS[s]; if (cf) for (const e of cf) if (TRADES_EX.indexOf(e) >= 0) exset[e] = 1; }
+    const exs = Object.keys(exset); if (!exs.length || SEEDBUSY.ex) return;   // in-flight-гард: сделки бирж — тяжёлый fan-out (кэш 8с) → не запускаем новый, пока прежний в полёте
+    SEEDBUSY.ex = true;
+    const lim = Math.max(50, Math.min(1000, CFG.mxtrades || 500));
+    try { const r = await fetch("/api/extrades?limit=" + lim + "&exs=" + exs.join(",") + "&symbols=" + encodeURIComponent(syms.join(","))).then((x) => x.json());
+      if (!r || !r.ok) return;
+      for (const sym in (r.trades || {})) { const byex = r.trades[sym] || {};
+        for (const ex in byex) { const pts = byex[ex]; if (pts && pts.length) pxSeed(sym + "::" + ex, pts); }   // pxSeed уважает SEEDSIG-скип (нет новых сделок = не пересобираем)
+      }
+    } catch (e) {} finally { SEEDBUSY.ex = false; }
+  }
   // плотная посекундная история: заменяет её окном [t0..t1] буфера (per-second ПОБЕЖДАЕТ грубые свечи в этом диапазоне),
   // сохраняя грубую историю СТАРШЕ t0 (fallback за пределами рекордера) и живой хвост НОВЕЕ t1
   function pxSeed(key, pts) {
     if (!pts || !pts.length) return;
-    const buf = BUF[key] || (BUF[key] = []);
     const t0 = pts[0][0], t1 = pts[pts.length - 1][0];
-    const older = buf.filter((p) => p[0] < t0 - 0.5);                    // грубые свечи старше рекордера — оставляем как есть
-    const newer = buf.filter((p) => p[0] > t1 + 0.5);                    // живые точки новее последней записанной секунды
-    const dense = []; for (const p of pts) if (p[1] > 0) dense.push([p[0], p[1]]);
-    const merged = older.concat(dense, newer);                          // порядок по времени сохранён (older<t0<=dense<=t1<newer)
+    const sig = pts.length + ":" + t0 + ":" + t1 + ":" + pts[pts.length - 1][1];
+    if (SEEDSIG[key] === sig) return;                                    // сервер вернул ТО ЖЕ окно (нет новых свопов/тиков) → не пересобираем массив (живой хвост уже дописан ingest'ом)
+    SEEDSIG[key] = sig;
+    const buf = BUF[key] || (BUF[key] = []);
+    // границы через бинарный поиск (буфер отсортирован по времени) — вместо двух O(n) filter + concat
+    const iOlder = idxAtOrAfter(buf, t0 - 0.5);                          // всё ДО него — грубые свечи старше рекордера (оставляем как есть)
+    const jNewer = idxAtOrAfter(buf, t1 + 0.5);                          // с него — живые точки новее последней записанной секунды
+    const merged = buf.slice(0, iOlder);
+    for (const p of pts) if (p[1] > 0) merged.push([p[0], p[1]]);        // плотная посекундная середина
+    for (let i = jNewer; i < buf.length; i++) merged.push(buf[i]);       // порядок по времени сохранён (older<t0<=dense<=t1<newer)
     BUF[key] = merged;
     if (merged.length > 30000) merged.splice(0, merged.length - 30000);
   }
   // подгрузка ПЛОТНОЙ посекундной истории (серверный рекордер) — каждое движение MEXC/DEX/fair за окно, сразу при открытии
   async function pxHistSeed(syms) {
+    if (!syms || !syms.length || SEEDBUSY.px) return;                      // in-flight-гард (посекундка серверная быстрая, но всё равно не наслаиваем)
+    SEEDBUSY.px = true;
     const sec = Math.min(21600, Math.max(60, Math.ceil(maxWin()) + 30));            // окно ячейки в секундах, потолок 6ч (maxlen рекордера)
     try { const r = await fetch("/api/pxhist?sec=" + sec + "&symbols=" + encodeURIComponent(syms.join(","))).then((x) => x.json());
       if (!r || !r.ok) return;
       for (const sym in (r.hist || {})) { const h = r.hist[sym] || {};
         for (const feed in h) {
           if (feed === "dex") continue;                                    // DEX историю ведёт dexTradesSeed (посвоповая, детальнее)
-          const key = feed === "fair" ? "mexcfair" : feed;                 // осн. биржи + mexc + справедливая — все посекундно
+          if (TRADES_EX.indexOf(feed) >= 0) continue;                      // CEX историю ведёт exTradesSeed (посделочно, глубже рекордера) — не перетираем окно
+          const key = feed === "fair" ? "mexcfair" : feed;                 // mexc + справедливая — посекундно из рекордера
           pxSeed(sym + "::" + key, h[feed]);
         }
       }
-    } catch (e) {}
+    } catch (e) {} finally { SEEDBUSY.px = false; }
   }
   function spreadNow(sym) { const px = []; let rise = 0, hiT = -1;
     const m = META[sym] || {}; for (const ex in m) { if (ex.endsWith("fair")) continue; const v = m[ex]; if (v && v.last) { px.push(v.last); if (v.turn > hiT) { hiT = v.turn; rise = v.rise; } } }   // DEX учитываем (MEXC↔DEX), справедливые — нет
@@ -458,12 +503,27 @@
         try { const lr = await fetch("/api/mxliq?symbols=" + encodeURIComponent(need.join(",")) + "&pct=0.5").then((x) => x.json());
           if (lr && lr.ok) Object.assign(LIQ, lr.liq || {}); } catch (e) {}
       }
-      // МГНОВЕННЫЙ сид: новая монета или окно расширили → тянем ВСЮ историю СРАЗУ (не ждать циклов) — быстрый прогруз 1в1
+      // МГНОВЕННЫЙ сид: новая монета или окно расширили → сразу тянем то, что ВИДНО в окне (посекундная + DEX),
+      // а тяжёлые свечи-историю (5 фетчей) НЕ грузим одним тиком — ставим в очередь и раскидываем по следующим тикам.
       const deep = need.filter((s) => !(SEEDED[s] >= winOf(s)));
-      if (deep.length) { for (const s of deep) SEEDED[s] = winOf(s); pxHistSeed(deep); klineSeed(deep); dexKlineSeed(deep); dexTradesSeed(deep); exKlineSeed(deep); }
-      if (_pc % 3 === 0) { pxHistSeed(need); }                         // ПЛОТНАЯ посекундная история MEXC/fair (свежая, часто)
-      if (_pc % 2 === 0) { dexTradesSeed(need); }                      // ПОСВОПОВАЯ линия DEX — часто, каждое движение пула
-      if (_pc % 8 === 2) { klineSeed(need); dexKlineSeed(need); exKlineSeed(need); }   // свечи MEXC/DEX/ДРУГИХ бирж — полная история слева (fallback старше рекордера)
+      if (deep.length) { for (const s of deep) SEEDED[s] = winOf(s);
+        pxHistSeed(deep); dexTradesSeed(deep); exTradesSeed(deep);
+        for (const s of deep) if (DEEPKQ.indexOf(s) < 0) DEEPKQ.push(s); }
+      if (DEEPKQ.length) { const batch = DEEPKQ.splice(0, 3); klineSeed(batch); dexKlineSeed(batch); exKlineSeed(batch); }   // догруз свечей-истории пачками ≤3 монет за тик
+      // ОТКРЫТЫЕ ЯЧЕЙКИ (видимые карточки) — их МАЛО → максимум детали: плотные сиды КАЖДЫЙ тик.
+      // Реальную частоту холодных фетчей ограничивает серверный кэш (extrades 8с / dextrades 6с) + in-flight-гард
+      // в самих сидах (не наслаиваем медленный запрос) → детально у края линии, но БЕЗ зависания.
+      const hotSet = {}; for (const s of CFG.cards) if (s) hotSet[s] = 1;
+      const hot = need.filter((s) => hotSet[s]).slice(0, HOT_MAX);      // видимые ячейки — детально каждую секунду
+      const bg = need.filter((s) => !hotSet[s]);                        // фон (закреплённые сверх видимых) — оптимизировано, реже
+      if (hot.length) { pxHistSeed(hot); exTradesSeed(hot); dexTradesSeed(hot); }   // посекундка + посделочно/посвопово у края — каждый тик
+      if (bg.length) {                                                 // фон — прежний разнесённый режим (не грузим браузер при многих закреплённых)
+        if (_pc % 4 === 1) pxHistSeed(bg);
+        if (_pc % 4 === 3) exTradesSeed(bg);
+        if (_pc % 2 === 0) dexTradesSeed(bg);
+      }
+      if (_pc % 8 === 4) { klineSeed(need); }                         // свечи MEXC — свой тик (fallback старше рекордера, история — можно реже)
+      if (_pc % 8 === 6) { dexKlineSeed(need); exKlineSeed(need); }   // свечи DEX/других бирж — отдельный тик (не вместе с MEXC-свечами)
     }
     // на каких биржах есть монета — для бейджей (ячейки + лента + закреп), кэшируется
     const wsy = need.slice(); for (const ev of FEEDLOG.slice(0, 30)) if (wsy.indexOf(ev.sym) < 0) wsy.push(ev.sym);
@@ -473,15 +533,42 @@
 
   // ── живой рендер (плавно, каждый кадр) ──
   let _lastFrame = 0;
+  const EASE_FRAMES = 10;                                             // после смены данных дорисовываем ~10 кадров (шкала плавно доезжает по SCALE_K), потом ячейка «засыпает»
+  function cellNewestT(sym) {                                         // самый свежий тик среди линий монеты — дёшево (last-элемент буферов, без обхода истории)
+    let t = 0; const ex = CFG.ex;
+    for (let i = 0; i < ex.length; i++) { const b = BUF[sym + "::" + ex[i]]; if (b && b.length) { const tt = b[b.length - 1][0]; if (tt > t) t = tt; } }
+    const cf = CELLFEEDS[sym];
+    if (cf) for (let i = 0; i < cf.length; i++) { const b = BUF[sym + "::" + cf[i]]; if (b && b.length) { const tt = b[b.length - 1][0]; if (tt > t) t = tt; } }
+    return t;
+  }
   function frame() { raf = requestAnimationFrame(frame);
     const w = win(); if (!w || w.classList.contains("hidden")) return;
     const t = Date.now(); if (t - _lastFrame < 55) return;             // ~18 fps: линии обновляются ~1с, 60fps не нужен → убирает лаги
     _lastFrame = t;
     const grid = g("mxgrid"); if (!grid) return;
-    try { for (const cell of grid.children) { const idx = +cell.dataset.idx, sym = CFG.cards[idx]; if (sym) drawCell(cell, sym); } }
+    // DIRTY-ФЛАГ: ячейку перерисовываем ТОЛЬКО когда пришёл новый тик, идёт сглаживание шкалы, есть взаимодействие
+    // мышью (перекрестие/линейка) или сменился размер холста. Иначе кадр пропускаем — главный поток свободен для кликов.
+    try { for (const cell of grid.children) {
+      const idx = +cell.dataset.idx, sym = CFG.cards[idx]; if (!sym) continue;
+      const cv = cell.querySelector(".mxccanvas");
+      const interacting = !!(cell._cross || cell._rul);
+      const nt = cellNewestT(sym), cwin = winOf(sym);
+      const cw2 = cv ? cv.clientWidth : 0, ch2 = cv ? cv.clientHeight : 0;
+      if (interacting || cell._pInt || nt !== cell._nt || cwin !== cell._win || cw2 !== cell._cw || ch2 !== cell._ch) cell._ease = EASE_FRAMES;
+      cell._pInt = interacting; cell._nt = nt; cell._win = cwin; cell._cw = cw2; cell._ch = ch2;
+      if ((cell._ease | 0) > 0) { cell._ease--; drawCell(cell, sym); }
+    } }
     catch (e) { const s = g("mxstat"); if (s) { s.textContent = "РИС.ОШИБКА: " + (e && e.message || e); s.style.color = "#ef5f5a"; } }
   }
   function idxAtOrAfter(b, t) { let lo = 0, hi = b.length; while (lo < hi) { const m = (lo + hi) >> 1; if (b[m][0] < t) lo = m + 1; else hi = m; } return lo; }   // первый индекс с t≥порога (буфер отсортирован)
+  // РОБАСТНЫЙ центр кластера цен: медиана, затем медиана только «ближних» (в 15%) значений → тёзки-выбросы не тянут центр
+  function clusterMed(vals) {
+    if (!vals.length) return 0;
+    const s = vals.slice().sort((a, b) => a - b); const m = s[Math.floor(s.length / 2)];
+    if (!(m > 0)) return 0;
+    const near = s.filter((v) => Math.abs(v - m) / m <= 0.15); const s2 = near.length ? near : s;
+    return s2[Math.floor(s2.length / 2)];
+  }
 
   function drawCell(cell, sym) {
     const cv = cell.querySelector(".mxccanvas"); if (!cv) return;
@@ -494,29 +581,46 @@
     const allLines = CFG.ex.filter((id) => { const b = BUF[sym + "::" + id]; return b && b.length; });
     if (!allLines.length) { const cf = CELLFEEDS[sym]; if (cf) for (const e of cf) { const b = BUF[sym + "::" + e]; if (b && b.length && allLines.indexOf(e) < 0) allLines.push(e); } }
     if (!allLines.length) { x.fillStyle = "#5b6573"; x.font = "11px monospace"; x.fillText("сбор данных…", 10, 20); return; }
-    // отсечь только ДИКИЕ коллизии (>5×), при ≤2 линиях не фильтруем; справедливую (пунктир) не трогаем
-    const lastsA = allLines.map((id) => { const b = BUF[sym + "::" + id]; return [id, b[b.length - 1][1]]; }).filter((z) => z[1] > 0);
-    const med = lastsA.length ? lastsA.map((z) => z[1]).sort((a, b) => a - b)[Math.floor(lastsA.length / 2)] : 0;
-    let lines = allLines;
-    if (allLines.length > 2 && med > 0) {
-      const kept = allLines.filter((id) => { if (id === "dex" || id.endsWith("fair")) return true; const v = BUF[sym + "::" + id], p = v[v.length - 1][1]; return p > 0 && p / med <= 5 && med / p <= 5; });   // dex/справедливые не режем как коллизию — своя природа/лаг (dex может законно разъехаться на пампе)
-      if (kept.length >= 2) lines = kept;
-    }
-    for (const f of allLines) if (f.endsWith("fair") && lines.indexOf(f) < 0) lines.push(f);   // справедливые не режем фильтром коллизий
-    // убрать ЗАСТЫВШИЕ фиды-выбросы: линия не менялась во всём окне И далеко (>3%) от кластера = битый/протухший фид (тикер-коллизия), а не движение
-    if (med > 0) lines = lines.filter((id) => {
-      if (id === "dex" || id.endsWith("fair")) return true;                    // dex/справедливые не трогаем (своя природа/лаг)
-      const b = BUF[sym + "::" + id], last = b[b.length - 1][1];
-      if (!(last > 0) || Math.abs(last - med) / med <= 0.03) return true;       // близко к кластеру → оставляем
-      const cut = now - Math.min(cw, 180);
-      for (let i = b.length - 1; i >= 0; i--) { if (b[i][0] < cut) break; if (b[i][1] !== last) return true; }   // менялась (реальное движение/арбитраж) → оставляем
-      return false;                                                            // застыла И далеко → выброс, не рисуем
+    // КЛАСТЕР-ФИЛЬТР (единый, с гистерезисом): CEX-линии одной монеты держатся вместе; линия далеко от
+    // кластера = токен-тёзка на другой бирже (напр. gate EDGE 0.072 против mexc 0.30) → не рисуем.
+    // dex/справедливые (пунктир) не трогаем — у них своя природа/лаг (dex может законно разъехаться на пампе).
+    const cexLasts = [];
+    for (const id of allLines) { if (id === "dex" || id.endsWith("fair")) continue; const b = BUF[sym + "::" + id]; const v = b[b.length - 1][1]; if (v > 0) cexLasts.push(v); }
+    const med = clusterMed(cexLasts);
+    const canFilter = cexLasts.length >= 3 && med > 0;                          // <3 CEX-линий — не с чем сравнивать кластер, не режем
+    let lines = allLines.filter((id) => {
+      if (id === "dex" || id.endsWith("fair")) return true;
+      const b = BUF[sym + "::" + id], p = b[b.length - 1][1];
+      if (!(p > 0)) return false;
+      if (!canFilter) return true;
+      const dev = Math.abs(p - med) / med, key = sym + "::" + id, shown = VIS[key] !== false;
+      let keep;
+      if (dev > CLU_HARD) keep = false;                                         // абсурдно далеко (точно тёзка) — скрыть сразу
+      else if (shown) keep = dev <= CLU_OUT;                                    // показана → скрыть, только если ушла > OUT (гистерезис)
+      else keep = dev <= CLU_IN;                                               // скрыта → вернуть, только если вошла < IN
+      VIS[key] = keep;
+      return keep;
     });
-    if (!lines.length) lines = allLines;                                       // подстраховка: не гасим всё
-    let hi = -Infinity, lo = Infinity;
-    for (const id of lines) { const b = BUF[sym + "::" + id]; for (let i = b.length - 1; i >= 0; i--) { if (b[i][0] < tMin) break; if (b[i][1] > hi) hi = b[i][1]; if (b[i][1] < lo) lo = b[i][1]; } }
-    if (!(hi > lo)) { const m = hi > 0 ? hi : 1; hi = m * 1.001; lo = m * 0.999; }
-    const pad = (hi - lo) * 0.12; hi += pad; lo -= pad; const rng = hi - lo || 1, dec = decOf((hi + lo) / 2);
+    if (!lines.some((id) => id !== "dex" && !id.endsWith("fair"))) lines = allLines;   // подстраховка: не гасим все реальные линии
+    // АВТОСКЕЙЛ (робастный): одиночный выброс ВНУТРИ линии не раздувает шкалу (спайк-гард к центру кластера)
+    let hi = -Infinity, lo = Infinity; const cap = med > 0 ? med : 0;
+    for (const id of lines) { const b = BUF[sym + "::" + id]; const special = (id === "dex" || id.endsWith("fair"));
+      for (let i = b.length - 1; i >= 0; i--) { if (b[i][0] < tMin) break; const v = b[i][1];
+        if (!(v > 0)) continue;
+        if (cap > 0 && !special && Math.abs(v - cap) / cap > CLU_HARD) continue;   // точка-выброс (тёзка/битый тик) не двигает hi/lo
+        if (v > hi) hi = v; if (v < lo) lo = v; } }
+    if (!(hi > lo)) { const m = hi > 0 ? hi : (cap > 0 ? cap : 1); hi = m * 1.001; lo = m * 0.999; }
+    const pad = (hi - lo) * 0.12; hi += pad; lo -= pad;
+    // СГЛАЖИВАНИЕ ШКАЛЫ: не телепортируем окно при появлении/уходе линии — плавно подъезжаем к цели.
+    // Если цель далеко (реальный сильный ход / смена диапазона >2×) — снап, чтобы не отставать.
+    const sc = SCALE[sym];
+    if (sc && isFinite(sc.hi) && sc.hi > sc.lo) {
+      const curRng = sc.hi - sc.lo, tgtRng = hi - lo;
+      const far = hi > sc.hi + curRng || lo < sc.lo - curRng || tgtRng > curRng * 2 || tgtRng < curRng * 0.5;
+      if (!far) { hi = sc.hi + (hi - sc.hi) * SCALE_K; lo = sc.lo + (lo - sc.lo) * SCALE_K; }
+    }
+    SCALE[sym] = { hi, lo };
+    const rng = hi - lo || 1, dec = decOf((hi + lo) / 2);
     const yOf = (p) => H - (p - lo) / rng * (H - 6) - 3;
     const priceAt = (y) => lo + (H - 3 - y) / (H - 6) * rng; cell._priceAt = priceAt;   // для линейки (Y→цена)
     const xOf = (t) => padL + Math.max(0, Math.min(1, (t - tMin) / (tMax - tMin))) * (W - padR - padL);
@@ -532,7 +636,10 @@
     for (const id of lines) { const b = BUF[sym + "::" + id], col = COL[id] || "#8a929c";
       const pts = []; const s0 = idxAtOrAfter(b, tMin);                  // пропуск к началу окна (не перебирать всю историю → без лагов)
       let lastV = s0 > 0 ? b[s0 - 1][1] : null, firstV = null;
-      for (let i = s0; i < b.length; i++) { if (firstV == null) firstV = b[i][1]; pts.push([xOf(b[i][0]), yOf(b[i][1])]); }
+      const total = b.length - s0, maxPts = Math.max(64, (W - padR - padL) * 3) | 0;
+      const stride = total > maxPts ? Math.ceil(total / maxPts) : 1;    // >3 точек на пиксель не видны (субпиксельные ступеньки) → прореживаем шаг только на очень широких окнах (24ч посекундно). Обычные окна: stride=1
+      for (let i = s0; i < b.length; i += stride) { if (firstV == null) firstV = b[i][1]; pts.push([xOf(b[i][0]), yOf(b[i][1])]); }
+      if (stride > 1 && (b.length - 1 - s0) % stride !== 0 && b.length) { const li = b.length - 1; pts.push([xOf(b[li][0]), yOf(b[li][1])]); }   // последняя (актуальная) точка — всегда
       let anchorV = (lastV != null) ? lastV : firstV;                    // есть реальная точка старше окна → тянем её плоско к левому краю (непрерывно, как THIEF)
       if (id === "dex" && lastV == null) anchorV = null;                  // DEX без сид-истории: НЕ рисуем фейковую плоскую полку во всю ширину — начинаем с первой реальной точки
       if (anchorV != null && pts.length) pts.unshift([xOf(tMin), yOf(anchorV)]);
@@ -549,9 +656,13 @@
     x.font = "10px ui-monospace,monospace";
     for (const pl of pills) { const yy = Math.max(7, Math.min(H - 5, pl.y)); x.fillStyle = pl.col; roundRect(x, W - padR + 1, yy - 6, padR - 3, 12, 3); x.fill(); x.fillStyle = "#0b0e12"; x.fillText(pl.v.toFixed(dec), W - padR + 4, yy + 3); }
     // header + footer
-    const m = META[sym] || {}, sp = spreadNow(sym);
+    const m = META[sym] || {};
     const prim = lines.find((e) => !e.endsWith("fair")) || lines[0];
-    const gapEl = cell.querySelector(".mxcgap"); if (gapEl) gapEl.textContent = sp.gap.toFixed(2) + "%";   // спред — жёлтой цифрой (наша палитра)
+    // спред в шапке = по РЕАЛЬНО НАРИСОВАННЫМ линиям (без справедливых), чтобы цифра совпадала с графиком, а не считалась по застывшим/невидимым фидам
+    let gmn = Infinity, gmx = -Infinity;
+    for (const id of lines) { if (id.endsWith("fair")) continue; const b = BUF[sym + "::" + id]; if (!b || !b.length) continue; const v = b[b.length - 1][1]; if (v > 0) { if (v < gmn) gmn = v; if (v > gmx) gmx = v; } }
+    const vgap = (gmn > 0 && gmx > gmn) ? (gmx - gmn) / gmn * 100 : 0;
+    const gapEl = cell.querySelector(".mxcgap"); if (gapEl) gapEl.textContent = vgap.toFixed(2) + "%";   // спред — жёлтой цифрой (наша палитра)
     const ca = cell.querySelector(".mxca"); if (ca) ca.classList.toggle("on", !!(m.dex));
     // подвал (THIEF): слева — на каких биржах есть монета; справа — D (актив/мин) · L (ликвидн.) · окно
     const foot = cell.querySelector(".mxcfoot"); if (foot) {
@@ -627,16 +738,61 @@
     const r = anchor.getBoundingClientRect(); p.style.left = Math.min(innerWidth - 236, Math.max(6, r.right - 228)) + "px"; p.style.top = (r.bottom + 4) + "px"; p.style.display = "block";
     if (inp) setTimeout(() => inp.focus(), 0); }
 
+  // ── скринер СДЕЛОК (активность): топ монет MEXC по числу сделок, клик → график в ячейке ──
+  let DPOP = null, DPOP_TIMER = null;
+  function ensureDPop() { if (DPOP) return DPOP;
+    const p = document.createElement("div"); p.className = "mxdealspop"; p.style.display = "none";
+    p.innerHTML = '<div class="mxdph">🔥 Активные <span class="mxdpu">сделок/мин · клик → график</span><span class="mxdpx" title="закрыть">✕</span></div><div class="mxdplist"></div>';
+    document.body.appendChild(p); DPOP = p;
+    p.querySelector(".mxdpx").onclick = closeDeals;
+    const hd = p.querySelector(".mxdph");                                   // перетаскивание окошка за заголовок
+    if (hd) { hd.style.cursor = "move"; let dx = 0, dy = 0, drag = false;
+      hd.addEventListener("mousedown", (e) => { if (e.target.classList.contains("mxdpx")) return; drag = true; const r = p.getBoundingClientRect(); dx = e.clientX - r.left; dy = e.clientY - r.top; e.preventDefault(); e.stopPropagation(); });
+      document.addEventListener("mousemove", (e) => { if (!drag) return; p.style.left = Math.max(0, Math.min(innerWidth - 60, e.clientX - dx)) + "px"; p.style.top = Math.max(0, Math.min(innerHeight - 24, e.clientY - dy)) + "px"; });
+      document.addEventListener("mouseup", () => { drag = false; }); }
+    // закрывать ТОЛЬКО при клике ВНЕ панели THIEF SQUAD (по крестику — отдельно). Клик по графику/ячейкам внутри панели — окошко ВИСИТ.
+    document.addEventListener("mousedown", (e) => {
+      if (!DPOP || DPOP.style.display === "none") return;
+      if (DPOP.contains(e.target) || e.target === g("mxdeals")) return;     // сам попап / кнопка-переключатель
+      const w = win(); if (w && w.contains(e.target)) return;               // клик ВНУТРИ THIEF SQUAD (график, ячейки, бар) — не закрывать
+      closeDeals();                                                         // клик совсем вне панели → закрыть
+    }, true);
+    return p; }
+  function closeDeals() { if (DPOP) DPOP.style.display = "none"; if (DPOP_TIMER) { clearInterval(DPOP_TIMER); DPOP_TIMER = null; } }
+  function renderDeals(rows) { const p = DPOP; if (!p) return; const box = p.querySelector(".mxdplist"); if (!box) return;
+    if (!rows || !rows.length) { box.innerHTML = '<div class="mxso-empty">Считаю сделки по ~1000 монет MEXC…<br>наполнится за ~30 секунд — НЕ закрывай окошко</div>'; return; }
+    const byDeals = (rows[0].tr || 0) > 0;                              // есть сделки → по сделкам; иначе фолбэк по обороту (не пусто)
+    const val = (r) => byDeals ? (r.tr || 0) : (r.turn || 0), mx = val(rows[0]) || 1;
+    const hint = p.querySelector(".mxdpu"); if (hint) hint.innerHTML = byDeals ? "сделок/мин · клик → график" : "по обороту $ (сделки копятся…) · клик → график";
+    box.innerHTML = rows.map((r) => { const base = (r.s || "").replace("_USDT", ""); const w = Math.max(3, Math.round(100 * val(r) / mx));
+      const num = byDeals ? (r.tr || 0) : fmtUsd(r.turn || 0);
+      return '<div class="mxdrow" data-s="' + r.s + '"><span class="mxdbar" style="width:' + w + '%"></span><b class="mxdsym">' + base + '</b><span class="mxdtr">' + num + '</span></div>'; }).join("");
+    box.querySelectorAll(".mxdrow").forEach((el) => { el.onclick = () => openInCell(el.dataset.s); });
+  }
+  async function loadDeals() { const p = DPOP; if (!p || p.style.display === "none") return;
+    try { const r = await fetch("/api/mxtop?by=deals&n=60&win=60").then((x) => x.json());
+      if (r && r.ok) renderDeals(r.rows || []); } catch (e) {}
+  }
+  function openDeals(anchor) { const p = ensureDPop();
+    if (p.style.display !== "none") { closeDeals(); return; }              // повторный клик = закрыть
+    p.style.display = "block"; renderDeals([]); loadDeals();
+    const r = anchor.getBoundingClientRect();
+    p.style.left = Math.min(innerWidth - 258, Math.max(6, r.left)) + "px";
+    p.style.top = Math.max(44, r.top - 388) + "px";                       // кнопка внизу панели → раскрываем ВВЕРХ
+    if (DPOP_TIMER) clearInterval(DPOP_TIMER); DPOP_TIMER = setInterval(loadDeals, 4000);   // обновление раз в 4с (не каждый тик)
+  }
+
   // ── окно ──
   // подготовить контент панели (наполнить сетку/панели) — вызывается и при загрузке, и при открытии
   function ensure() {
-    const stv = g("mxstat"); if (stv) { stv.textContent = "v234"; stv.style.color = "#6b7280"; }
+    const stv = g("mxstat"); if (stv) { stv.textContent = "v245"; stv.style.color = "#6b7280"; }
     try {
       if (!CFG.cards || !CFG.cards.length) { CFG.cards = DEF.cards.slice(); save(); }
       renderBar(); renderZoom(); renderGrid(); loadSyms();
       const sb = g("mxsound"); if (sb) sb.classList.toggle("on", CFG.sound);
       const th = g("mxthresh"); if (th) th.value = CFG.thresh;
-    } catch (e) { if (stv) { stv.textContent = "v234 ОШИБКА: " + (e && e.message || e); stv.style.color = "#ef5f5a"; } }
+      const mt = g("mxtrades"); if (mt) mt.value = String(CFG.mxtrades || 500);
+    } catch (e) { if (stv) { stv.textContent = "v245 ОШИБКА: " + (e && e.message || e); stv.style.color = "#ef5f5a"; } }
   }
   function open() {
     const w = win(); if (!w) return;
@@ -649,7 +805,7 @@
     if (timer) clearInterval(timer); timer = setInterval(poll, POLL_MS);
     if (!raf) raf = requestAnimationFrame(frame);
   }
-  function close() { const w = win(); if (w) w.classList.add("hidden"); if (timer) { clearInterval(timer); timer = null; } if (raf) { cancelAnimationFrame(raf); raf = null; } }
+  function close() { const w = win(); if (w) w.classList.add("hidden"); if (timer) { clearInterval(timer); timer = null; } if (raf) { cancelAnimationFrame(raf); raf = null; } closeDeals(); }
 
   function init() {
     const w = win(); if (!w) return;
@@ -660,6 +816,8 @@
     const addb = g("mxaddb"); if (addb) addb.onclick = () => { const a = g("mxadd"); if (a) { pin(a.value); a.value = ""; } };
     const sb = g("mxsound"); if (sb) sb.onclick = () => { CFG.sound = !CFG.sound; save(); sb.classList.toggle("on", CFG.sound); if (CFG.sound) chime(false); };
     const th = g("mxthresh"); if (th) { th.value = CFG.thresh; th.onchange = () => { const v = parseFloat(th.value); if (v > 0) { CFG.thresh = v; save(); } }; }
+    const mt = g("mxtrades"); if (mt) { mt.value = String(CFG.mxtrades || 500); mt.onchange = () => { const v = parseInt(mt.value, 10); if (v > 0) { CFG.mxtrades = v; save(); for (const k in SEEDSIG) if (k.indexOf("::") > 0 && TRADES_EX.indexOf(k.split("::")[1]) >= 0) delete SEEDSIG[k]; } }; }   // сброс сигнатур сделок-линий → следующий сид перетянет на новую глубину
+    const dl = g("mxdeals"); if (dl) dl.onclick = () => openDeals(dl);
     const ac = g("mxaddcard"); if (ac) ac.onclick = () => { CFG.cards.push(""); save(); renderGrid(); };
     const gr = g("mxgear"); if (gr) gr.onclick = openSettings;
     const gridEl = g("mxgrid");                                        // футер ячейки переписывается каждый кадр → клики по квадратикам бирж ловим ДЕЛЕГАТОМ
